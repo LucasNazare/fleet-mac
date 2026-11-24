@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fleet.dev/schema/fleet.yml.json",
+  "title": "fleet.yml",
+  "description": "Project config for fleet: processes, GitHub sync, ship/deploy and Claude settings. Never put secret values here, only env var names.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "project": { "type": "string", "minLength": 1 },
+    "processes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "command"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1 },
+          "command": { "type": "string", "minLength": 1 },
+          "cwd": { "type": "string" },
+          "env": { "type": "array", "items": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" } },
+          "autoStart": { "type": "boolean" },
+          "autoRestart": { "type": "boolean" },
+          "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+        }
+      }
+    },
+    "sync": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "branchPrefix": { "type": "string", "pattern": "^[A-Za-z0-9._-]+/$" },
+        "fetchIntervalSec": { "type": "integer", "minimum": 30, "maximum": 3600 },
+        "setup": { "type": "string" },
+        "checks": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "deployCommand": { "type": "string" },
+        "mergeStyle": { "enum": ["squash", "merge", "rebase"] },
+        "mainIsProtected": { "type": "boolean" },
+        "wipOnQuit": { "type": "boolean" },
+        "chatSync": { "type": "boolean" }
+      }
+    },
+    "claude": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "defaultArgs": { "type": "array", "items": { "type": "string" } },
+        "titleModel": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

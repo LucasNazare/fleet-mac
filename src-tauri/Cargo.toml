@@ -1,0 +1,50 @@
+[package]
+name = "fleet"
+version = "0.1.0"
+edition = "2021"
+default-run = "fleet"
+
+[lib]
+name = "fleet_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "fleet"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "macos-private-api"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+portable-pty = "0.9"
+parking_lot = "0.12"
+uuid = { version = "1", features = ["v4"] }
+dirs = "6"
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+mac-notification-sys = "0.6"
+libc = "0.2"
+notify = "8"
+notify-debouncer-mini = "0.7"
+ignore = "0.4"
+trash = "5"
+regex = "1"
+similar = "2"
+jsonschema = { version = "0.63", default-features = false }
+marked-yaml = "0.8"
+serde_yaml_ng = "0.10"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["NSWorkspace", "NSSound", "std", "block2"] }
+objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "UNUserNotificationCenter", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationSettings", "UNNotificationSound", "UNNotificationTrigger"] }
+objc2 = "0.6"
+block2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSNotification", "NSString", "NSOperation", "NSObject", "block2"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

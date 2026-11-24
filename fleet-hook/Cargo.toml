@@ -1,0 +1,13 @@
+[package]
+name = "fleet-hook"
+version = "0.1.0"
+edition = "2021"
+description = "Forwards Claude Code hook payloads to fleet's local socket. Never blocks, always exits 0."
+
+[dependencies]
+serde_json = "1"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

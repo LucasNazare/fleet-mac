@@ -1,0 +1,13 @@
+[package]
+name = "fleet-remote-mcp"
+version = "0.1.0"
+edition = "2021"
+description = "MCP server (stdio) giving Claude Code file and shell tools on a remote server over fleet's SSH connection."
+
+[dependencies]
+serde_json = "1"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
