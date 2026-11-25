@@ -1,7 +1,7 @@
 branch: fleet/im-fleet-release-build-and-manual-test
 glyph: IM
 color: '#FFA657'
-title: Atrium-v2 worktree cleanup safety check
+title: Adding processes to synced fleet.yml
 titleHistory:
 - '[Image #1]'
 - Fix Ship hanging on no-op branches
@@ -9,14 +9,15 @@ titleHistory:
 - 'Fleet fix: ship to main, then'
 - Fleet release build and manual test
 - Fleet restarted on new merge-check build
-state: done
-prompts: 6
+- Atrium-v2 worktree cleanup safety check
+state: needs_reply
+prompts: 7
 recap:
-- 'Checked six worktrees: none have uncommitted code, and merging would not change main'
-- Safe to close all six sessions and remove the worktrees
-- Closing a session ends its Claude chat, so archive any you may want back
-- Two remote fleet branches add nothing to main and can be deleted
-- Keep backup/repasse-fix-pre-rebase until main is confirmed to include the repasse fix
+- Synced projects keep their process list in fleet.yml, so the old add dialog is gone by design
+- Add processes through the YAML editor behind "+ Add process (fleet.yml)"
+- Saved edits commit to a fleet/config branch and reach main with the next Ship
+- Offered to restore the dialog for synced projects, writing into fleet.yml and keeping comments
+- Awaiting the user's decision on restoring the dialog
 lastMachine: MacBook Pro de Lucas
-updatedAt: 2026-11-25T18:56:01Z
+updatedAt: 2026-11-25T19:05:32Z
 archived: false
