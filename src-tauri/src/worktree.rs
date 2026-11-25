@@ -33,6 +33,53 @@ fn git(root: &Path, args: &[&str]) -> Result<String, String> {
     }
 }
 
+/// Ignored things a fresh worktree lacks but needs to run: `.env*` files (copied) and
+/// `node_modules` folders (APFS clones: instant, nearly free on disk, and independent, so no
+/// session links its worktree to the main checkout's — such links got committed and broke every
+/// checkout). Only fills what's missing; never touches anything already in the worktree.
+/// Returns the paths it added.
+pub fn prepare(root: &Path, wt: &Path) -> Vec<String> {
+    static BUSY: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _g = BUSY.lock().unwrap_or_else(|e| e.into_inner());
+    if root == wt || !wt.is_dir() {
+        return vec![];
+    }
+    let list = git(root, &["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"]).unwrap_or_default();
+    let mut added = vec![];
+    for entry in list.split('\0').filter(|e| !e.is_empty() && !e.starts_with(".fleet/")) {
+        let rel = entry.trim_end_matches('/');
+        let name = rel.rsplit('/').next().unwrap_or(rel);
+        let (src, dst) = (root.join(rel), wt.join(rel));
+        let Ok(meta) = std::fs::symlink_metadata(&src) else { continue };
+        if meta.file_type().is_symlink() || std::fs::symlink_metadata(&dst).is_ok() {
+            continue;
+        }
+        let ok = if name == "node_modules" && meta.is_dir() {
+            if let Some(parent) = dst.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let ok = Command::new("/bin/cp").arg("-cR").arg(&src).arg(&dst).status().map(|s| s.success()).unwrap_or(false);
+            if !ok {
+                let _ = std::fs::remove_dir_all(&dst);
+            }
+            ok
+        } else if name.starts_with(".env") && meta.is_file() {
+            dst.parent().map(|p| std::fs::create_dir_all(p).is_ok()).unwrap_or(false) && std::fs::copy(&src, &dst).is_ok()
+        } else {
+            false
+        };
+        if ok {
+            added.push(rel.to_string());
+        }
+    }
+    added
+}
+
+fn prepare_in_background(root: &Path, wt: &Path) {
+    let (root, wt) = (root.to_path_buf(), wt.to_path_buf());
+    std::thread::spawn(move || prepare(&root, &wt));
+}
+
 /// Create the worktree; returns its path.
 pub fn create(root: &Path, title: &str) -> Result<String, String> {
     git(root, &["rev-parse", "--verify", "HEAD"]).map_err(|_| "This project needs at least one commit before sessions can use worktrees.".to_string())?;
@@ -43,6 +90,7 @@ pub fn create(root: &Path, title: &str) -> Result<String, String> {
     std::fs::create_dir_all(&base).map_err(|e| e.to_string())?;
     processes::exclude_locally(root, ".fleet/").map_err(|e| e.to_string())?;
     git(root, &["worktree", "add", &path.to_string_lossy(), "-b", &format!("fleet/{slug}")])?;
+    prepare_in_background(root, &path);
     Ok(path.to_string_lossy().into())
 }
 
@@ -55,6 +103,7 @@ pub fn create_detached(root: &Path, title: &str, base: &str) -> Result<String, S
     std::fs::create_dir_all(&base_dir).map_err(|e| e.to_string())?;
     processes::exclude_locally(root, ".fleet/").map_err(|e| e.to_string())?;
     git(root, &["worktree", "add", "--detach", &path.to_string_lossy(), base])?;
+    prepare_in_background(root, &path);
     Ok(path.to_string_lossy().into())
 }
 
@@ -118,6 +167,30 @@ mod tests {
         let ex = std::fs::read_to_string(d.join(".git/info/exclude")).unwrap();
         assert!(ex.contains(".fleet/"));
         assert_eq!(create(&d, "Pix fee labels").unwrap().rsplit('/').next().unwrap(), "pix-fee-labels-2");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn prepare_fills_ignored_env_and_node_modules() {
+        let d = std::env::temp_dir().join(format!("fleet-prep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("web/node_modules/vite")).unwrap();
+        std::fs::create_dir_all(d.join("api/node_modules")).unwrap();
+        let sh = |c: &str| assert!(Command::new("/bin/sh").arg("-c").arg(c).current_dir(&d).status().unwrap().success());
+        sh("git init -q -b main && printf 'node_modules\\n.env*\\n' > .gitignore && touch web/a api/a && git add -A && git -c user.name=t -c user.email=t@t commit -qm i");
+        std::fs::write(d.join("web/node_modules/vite/index.js"), "v").unwrap();
+        std::fs::write(d.join("api/.env"), "K=1").unwrap();
+        std::fs::write(d.join(".env.local"), "L=1").unwrap();
+        let wt = d.join("wt");
+        sh("git worktree add -q --detach wt");
+        std::fs::write(wt.join(".env.local"), "mine").unwrap();
+        let mut added = prepare(&d, &wt);
+        added.sort();
+        assert_eq!(added, vec!["api/.env", "api/node_modules", "web/node_modules"]);
+        assert_eq!(std::fs::read_to_string(wt.join("web/node_modules/vite/index.js")).unwrap(), "v");
+        assert!(!std::fs::symlink_metadata(wt.join("web/node_modules")).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_to_string(wt.join(".env.local")).unwrap(), "mine", "existing files are left alone");
+        assert!(prepare(&d, &wt).is_empty());
         let _ = std::fs::remove_dir_all(&d);
     }
 }

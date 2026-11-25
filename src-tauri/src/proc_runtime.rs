@@ -5,7 +5,7 @@ use crate::model::{now_ms, ProcessDef, Project};
 use crate::processes::{self, ProcessRun, RunStatus};
 use crate::{notify, shell_env, Fleet};
 use portable_pty::CommandBuilder;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -82,6 +82,9 @@ pub fn start_in(app: &AppHandle, project_id: &str, def_id: &str, cols: u16, rows
     });
     let base: PathBuf = base_session.as_ref().map(|b| PathBuf::from(&b.2)).filter(|p| p.is_dir()).unwrap_or_else(|| PathBuf::from(&project.root_path));
     let cwd: PathBuf = base.join(if def.cwd.is_empty() { "." } else { &def.cwd });
+    if base_session.is_some() {
+        crate::worktree::prepare(Path::new(&project.root_path), &base);
+    }
     if !cwd.is_dir() {
         return Err(format!("Working folder {} doesn't exist", cwd.display()));
     }
@@ -142,6 +145,9 @@ pub fn start_in(app: &AppHandle, project_id: &str, def_id: &str, cols: u16, rows
     Ok(run)
 }
 
+/// Crashes in a row (each within a minute of starting) after which auto-restart gives up.
+const MAX_QUICK_RESTARTS: u32 = 5;
+
 fn on_exit(app: &AppHandle, key: &str, code: Option<i32>) {
     let f = app.state::<Fleet>();
     let mut runs = f.runs.lock();
@@ -189,7 +195,10 @@ fn on_exit(app: &AppHandle, key: &str, code: Option<i32>) {
     if !visible {
         notify::send(&r.key, &format!("fleet — {}", project.name), &format!("✕ {} crashed in {} (exit {})", def.name, project.name, code.unwrap_or(-1)));
     }
-    if def.auto_restart {
+    if def.auto_restart && r.restarts >= MAX_QUICK_RESTARTS {
+        emit_run(app, &r);
+        let _ = app.emit("toast", format!("{} crashed {} times in a row within a minute of starting; fleet stopped restarting it. Check its output, then start it again.", def.name, r.restarts + 1));
+    } else if def.auto_restart {
         let delay = processes::backoff_secs(r.restarts);
         let at = now_ms() + delay as i64 * 1000;
         if let Some(run) = f.runs.lock().get_mut(&r.key) {

@@ -155,31 +155,7 @@ test("uppercase, space and punctuation are typed once", async ({ page }) => {
   await expect.poll(async () => (await typed()).slice(start)).toBe("AA Bb, let's \"go\"!");
 });
 
-test("dead keys: ' then s after a commit that repeats it types 's once", async ({ page }) => {
-  await page.goto("/");
-  await addProject(page);
-  await page.keyboard.press("Meta+n");
-  const ta = page.locator(".term-host .xterm-helper-textarea").first();
-  await expect(ta).toBeAttached();
-  await ta.focus();
-  const typed = () => page.evaluate(() => (window as any).__fleetMock.ptyWrites.map((w: any) => w.data).join(""));
-  const start = (await typed()).length;
-  await page.evaluate(() => {
-    const t = document.activeElement as HTMLTextAreaElement;
-    const key = (k: string, composing: boolean) => {
-      const e = new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true, isComposing: composing });
-      Object.defineProperty(e, "keyCode", { value: 229 });
-      t.dispatchEvent(e);
-    };
-    const comp = (type: string, data: string) => t.dispatchEvent(new CompositionEvent(type, { data, bubbles: true }));
-    const input = (inputType: string, data: string) => t.dispatchEvent(new InputEvent("input", { inputType, data, bubbles: true }));
-    key("Dead", false); comp("compositionstart", ""); comp("compositionupdate", "'"); input("insertCompositionText", "'");
-    key("s", true); comp("compositionend", "'"); input("insertText", "'s");
-  });
-  await expect.poll(async () => (await typed()).slice(start)).toBe("'s");
-});
-
-test("dead keys: ' then r types 'r once, ' then a types á (ABNT2 / US-International)", async ({ page }) => {
+test("dead keys: ' then r types 'r once, ' then a types á, whatever order WebKit fires events in", async ({ page }) => {
   await page.goto("/");
   await addProject(page);
   await page.keyboard.press("Meta+n");
@@ -189,25 +165,43 @@ test("dead keys: ' then r types 'r once, ' then a types á (ABNT2 / US-Internati
   const typed = () => page.evaluate(() => (window as any).__fleetMock.ptyWrites.map((w: any) => w.data).join(""));
   const start = (await typed()).length;
   await page.keyboard.type("we");
-  // What macOS WebKit fires for a dead key, then a key it can't accent (two orders seen in the
-  // wild) or one it can.
+  // What macOS WebKit fires for a dead key, then a key it can't accent (several orders seen in
+  // the wild, some repeating the committed ') or one it can. The textarea's value is kept as
+  // WebKit keeps it: the composition is replaced in place, never duplicated.
   await page.evaluate(() => {
     const t = document.activeElement as HTMLTextAreaElement;
+    let compAt = 0; // where the current composition starts in t.value
     const key = (k: string, composing: boolean) => {
       const e = new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true, isComposing: composing });
       Object.defineProperty(e, "keyCode", { value: 229 });
       t.dispatchEvent(e);
     };
-    const comp = (type: string, data: string) => t.dispatchEvent(new CompositionEvent(type, { data, bubbles: true }));
-    const input = (inputType: string, data: string) => t.dispatchEvent(new InputEvent("input", { inputType, data, bubbles: true }));
-    const dead = () => { key("Dead", false); comp("compositionstart", ""); comp("compositionupdate", "'"); t.value += "'"; input("insertCompositionText", "'"); };
+    const comp = (type: string, data: string) => {
+      if (type === "compositionupdate") t.value = t.value.slice(0, compAt) + data;
+      t.dispatchEvent(new CompositionEvent(type, { data, bubbles: true }));
+    };
+    const input = (inputType: string, data: string, replace = false) => {
+      t.value = replace ? t.value.slice(0, compAt) + data : t.value + (inputType === "insertCompositionText" ? "" : data);
+      t.dispatchEvent(new InputEvent("input", { inputType, data, bubbles: true }));
+    };
+    const dead = () => {
+      key("Dead", false);
+      compAt = t.value.length;
+      comp("compositionstart", "");
+      comp("compositionupdate", "'");
+      input("insertCompositionText", "'");
+    };
     // ' r → commit "'" then insert "r"
-    dead(); key("r", true); comp("compositionend", "'"); t.value += "r"; input("insertText", "r");
+    dead(); key("r", true); comp("compositionend", "'"); input("insertText", "r");
     // ' r → commit "'r" at once
     dead(); key("r", true); comp("compositionupdate", "'r"); input("insertCompositionText", "'r"); comp("compositionend", "'r");
     // ' a → á
     dead(); key("a", true); comp("compositionupdate", "á"); input("insertCompositionText", "á"); comp("compositionend", "á");
+    // ' s → commit "'", then an insertText "'s" that replaces the committed '
+    dead(); key("s", true); comp("compositionend", "'"); input("insertText", "'s", true);
+    // ' s → insertText "'s" replacing the composition before compositionend repeats "'"
+    dead(); key("s", true); input("insertText", "'s", true); comp("compositionend", "'");
   });
   await page.keyboard.type("e");
-  await expect.poll(async () => (await typed()).slice(start)).toBe("we'r'ráe");
+  await expect.poll(async () => (await typed()).slice(start)).toBe("we'r'rá's'se");
 });

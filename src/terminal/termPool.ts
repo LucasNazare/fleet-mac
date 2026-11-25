@@ -165,22 +165,23 @@ function isPrintable(ev: KeyboardEvent): boolean {
 }
 
 /**
- * Text from the macOS input method: accents via dead keys (' " ` ~ ^ on ABNT2 / US-International),
- * Option-combos and IMEs. xterm.js's composition handling misreads WebKit's event order (' then r
- * came out as ''), so these events never reach it: the text is sent once, as the input method
- * commits it (compositionend), and plain inserted text (input/insertText) as it arrives.
- * Capture listeners on the terminal's container run before xterm's own on its textarea.
+ * All typed text: printable keys, accents via dead keys (' " ` ~ ^ on ABNT2 / US-International),
+ * Option-combos and IMEs. xterm.js never sees these events (capture listeners on the terminal's
+ * container run before xterm's own on its textarea). WebKit's event data can't be trusted (a dead
+ * key's commit can arrive twice: ' then r came out as ''r), but the textarea's value always ends up
+ * as a native text box would show it, so what's sent is whatever the value gained since the last
+ * send, once no composition is in progress. The textarea is emptied after each burst of events.
  * `localStorage["fleet.keyTrace"] = "1"` logs the events to the console.
  */
 function textInput(el: HTMLElement, send: (data: string) => void) {
   let composing = false;
-  // Text the last compositionend sent. WebKit can follow it with an insertText that repeats it
-  // (' then s → compositionend "'" + insertText "'s"); only the new part is sent.
-  let committed = "";
+  let sent = ""; // the part of the textarea's value already sent
+  let clearTimer = 0;
   const trace = (ev: Event) => {
     if (!localStorage.getItem("fleet.keyTrace")) return;
-    if (ev instanceof KeyboardEvent) console.log("[fleet key]", ev.type, ev.key, ev.keyCode, ev.isComposing ? "composing" : "");
-    else console.log("[fleet key]", ev.type, (ev as InputEvent).inputType ?? "", JSON.stringify((ev as InputEvent).data ?? null));
+    const ta = ev.target as HTMLTextAreaElement;
+    if (ev instanceof KeyboardEvent) console.log("[fleet key]", ev.type, ev.key, ev.keyCode, ev.isComposing ? "composing" : "", JSON.stringify(ta.value));
+    else console.log("[fleet key]", ev.type, (ev as InputEvent).inputType ?? "", JSON.stringify((ev as InputEvent).data ?? null), JSON.stringify(ta.value));
   };
   const own = (ev: Event) => {
     if (!(ev.target instanceof HTMLTextAreaElement)) return false;
@@ -188,28 +189,29 @@ function textInput(el: HTMLElement, send: (data: string) => void) {
     ev.stopImmediatePropagation();
     return true;
   };
+  const flush = (ta: HTMLTextAreaElement) => {
+    if (composing) return;
+    const v = ta.value;
+    let i = 0;
+    while (i < v.length && i < sent.length && v[i] === sent[i]) i++;
+    // WebKit stores a typed space in the value as U+00A0; Option+Space types one too.
+    const added = v.slice(i).replace(/\u00a0/g, " ");
+    sent = v;
+    if (added) send(added);
+    clearTimeout(clearTimer);
+    clearTimer = window.setTimeout(() => {
+      if (!composing && ta.value === sent) ta.value = sent = "";
+    }, 0);
+  };
   el.addEventListener("compositionstart", (ev) => { if (own(ev)) composing = true; }, true);
   el.addEventListener("compositionupdate", own, true);
   el.addEventListener("compositionend", (ev) => {
     if (!own(ev)) return;
     composing = false;
-    const data = (ev as CompositionEvent).data;
-    if (data) send(data);
-    committed = data ?? "";
-    setTimeout(() => { committed = ""; }, 0);
-    const ta = ev.target as HTMLTextAreaElement;
-    setTimeout(() => { if (!composing) ta.value = ""; }, 0);
+    flush(ev.target as HTMLTextAreaElement);
   }, true);
   el.addEventListener("input", (ev) => {
-    if (!own(ev)) return;
-    const ie = ev as InputEvent;
-    if (composing || ie.inputType !== "insertText" || !ie.data) return;
-    let data = ie.data;
-    if (committed && data.startsWith(committed)) data = data.slice(committed.length);
-    committed = "";
-    if (data) send(data);
-    const ta = ev.target as HTMLTextAreaElement;
-    setTimeout(() => { if (!composing) ta.value = ""; }, 0);
+    if (own(ev)) flush(ev.target as HTMLTextAreaElement);
   }, true);
   el.addEventListener("keydown", (ev) => { if (ev.target instanceof HTMLTextAreaElement) trace(ev); }, true);
 }
