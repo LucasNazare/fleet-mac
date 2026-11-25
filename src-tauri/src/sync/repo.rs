@@ -21,7 +21,7 @@ pub fn first_commit(git: &Git) -> Result<Vec<String>, String> {
     git.run(&["symbolic-ref", "HEAD", "refs/heads/main"]).map_err(|e| e.to_string())?;
     git.run(&["add", "-A"]).map_err(|e| e.to_string())?;
     let staged: Vec<String> = git.read(&["diff", "--cached", "--name-only", "-z"]).unwrap_or_default().split('\0').filter(|s| !s.is_empty()).map(String::from).collect();
-    let skipped: Vec<String> = staged.iter().filter(|p| autocommit::is_excluded(p, std::fs::metadata(git.root.join(p)).map(|m| m.len()).unwrap_or(0))).cloned().collect();
+    let skipped: Vec<String> = autocommit::excluded_paths(&git.root, &staged);
     if !skipped.is_empty() {
         let mut a = vec!["rm", "-q", "--cached", "--"];
         a.extend(skipped.iter().map(|s| s.as_str()));

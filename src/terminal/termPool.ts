@@ -126,6 +126,10 @@ function ensure(id: string): Entry {
     if (ev.metaKey) return false;
     // Keys the input method is handling (dead keys, IME): their text comes from textInput().
     if (ev.isComposing || ev.keyCode === 229 || ev.key === "Dead") return false;
+    // Printable text (letters, Shift+letters, space, punctuation, Option-chars) also comes only
+    // from textInput(). xterm.js sends A-Z, space and Option-chars from keypress, and WebKit still
+    // fires the input event afterwards, so letting xterm handle them typed everything twice.
+    if (isPrintable(ev)) return false;
     // Shift+Enter → newline in Claude Code's prompt. xterm.js would send a plain CR
     // (= submit); send ESC+CR instead, which Claude Code treats as a line break
     // (same as Option+Enter).
@@ -154,6 +158,12 @@ function ensure(id: string): Entry {
   return e;
 }
 
+/** A key whose text the browser inserts into xterm's textarea (no Ctrl/⌘, Option only as a char). */
+function isPrintable(ev: KeyboardEvent): boolean {
+  if (ev.key.length !== 1 || ev.ctrlKey || ev.metaKey) return false;
+  return !(ev.altKey && termSettings.optionAsMeta);
+}
+
 /**
  * Text from the macOS input method: accents via dead keys (' " ` ~ ^ on ABNT2 / US-International),
  * Option-combos and IMEs. xterm.js's composition handling misreads WebKit's event order (' then r
@@ -164,6 +174,9 @@ function ensure(id: string): Entry {
  */
 function textInput(el: HTMLElement, send: (data: string) => void) {
   let composing = false;
+  // Text the last compositionend sent. WebKit can follow it with an insertText that repeats it
+  // (' then s → compositionend "'" + insertText "'s"); only the new part is sent.
+  let committed = "";
   const trace = (ev: Event) => {
     if (!localStorage.getItem("fleet.keyTrace")) return;
     if (ev instanceof KeyboardEvent) console.log("[fleet key]", ev.type, ev.key, ev.keyCode, ev.isComposing ? "composing" : "");
@@ -182,13 +195,21 @@ function textInput(el: HTMLElement, send: (data: string) => void) {
     composing = false;
     const data = (ev as CompositionEvent).data;
     if (data) send(data);
+    committed = data ?? "";
+    setTimeout(() => { committed = ""; }, 0);
     const ta = ev.target as HTMLTextAreaElement;
     setTimeout(() => { if (!composing) ta.value = ""; }, 0);
   }, true);
   el.addEventListener("input", (ev) => {
     if (!own(ev)) return;
     const ie = ev as InputEvent;
-    if (!composing && ie.inputType === "insertText" && ie.data) send(ie.data);
+    if (composing || ie.inputType !== "insertText" || !ie.data) return;
+    let data = ie.data;
+    if (committed && data.startsWith(committed)) data = data.slice(committed.length);
+    committed = "";
+    if (data) send(data);
+    const ta = ev.target as HTMLTextAreaElement;
+    setTimeout(() => { if (!composing) ta.value = ""; }, 0);
   }, true);
   el.addEventListener("keydown", (ev) => { if (ev.target instanceof HTMLTextAreaElement) trace(ev); }, true);
 }

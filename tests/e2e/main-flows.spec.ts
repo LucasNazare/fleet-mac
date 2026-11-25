@@ -142,6 +142,43 @@ test("⌘G toggles the git panel", async ({ page }) => {
   await expect(page.locator(".right-panel")).toHaveCount(1);
 });
 
+test("uppercase, space and punctuation are typed once", async ({ page }) => {
+  await page.goto("/");
+  await addProject(page);
+  await page.keyboard.press("Meta+n");
+  const ta = page.locator(".term-host .xterm-helper-textarea").first();
+  await expect(ta).toBeAttached();
+  await ta.focus();
+  const typed = () => page.evaluate(() => (window as any).__fleetMock.ptyWrites.map((w: any) => w.data).join(""));
+  const start = (await typed()).length;
+  await page.keyboard.type("AA Bb, let's \"go\"!");
+  await expect.poll(async () => (await typed()).slice(start)).toBe("AA Bb, let's \"go\"!");
+});
+
+test("dead keys: ' then s after a commit that repeats it types 's once", async ({ page }) => {
+  await page.goto("/");
+  await addProject(page);
+  await page.keyboard.press("Meta+n");
+  const ta = page.locator(".term-host .xterm-helper-textarea").first();
+  await expect(ta).toBeAttached();
+  await ta.focus();
+  const typed = () => page.evaluate(() => (window as any).__fleetMock.ptyWrites.map((w: any) => w.data).join(""));
+  const start = (await typed()).length;
+  await page.evaluate(() => {
+    const t = document.activeElement as HTMLTextAreaElement;
+    const key = (k: string, composing: boolean) => {
+      const e = new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true, isComposing: composing });
+      Object.defineProperty(e, "keyCode", { value: 229 });
+      t.dispatchEvent(e);
+    };
+    const comp = (type: string, data: string) => t.dispatchEvent(new CompositionEvent(type, { data, bubbles: true }));
+    const input = (inputType: string, data: string) => t.dispatchEvent(new InputEvent("input", { inputType, data, bubbles: true }));
+    key("Dead", false); comp("compositionstart", ""); comp("compositionupdate", "'"); input("insertCompositionText", "'");
+    key("s", true); comp("compositionend", "'"); input("insertText", "'s");
+  });
+  await expect.poll(async () => (await typed()).slice(start)).toBe("'s");
+});
+
 test("dead keys: ' then r types 'r once, ' then a types á (ABNT2 / US-International)", async ({ page }) => {
   await page.goto("/");
   await addProject(page);

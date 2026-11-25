@@ -80,6 +80,17 @@ pub fn is_excluded(path: &str, size: u64) -> bool {
     name.starts_with(".env") || name.ends_with(".pem") || name.ends_with(".key") || name.starts_with("id_rsa") || size > MAX_FILE
 }
 
+/// A symlink to an absolute path (e.g. a worktree's `node_modules` -> the main folder's): only
+/// valid on this machine, and once committed every checkout replaces the real folder with it.
+pub fn is_machine_link(root: &std::path::Path, path: &str) -> bool {
+    std::fs::read_link(root.join(path)).map(|t| t.is_absolute()).unwrap_or(false)
+}
+
+/// Staged paths that must not be committed: secrets, huge files, machine-specific symlinks.
+pub fn excluded_paths(root: &std::path::Path, staged: &[String]) -> Vec<String> {
+    staged.iter().filter(|p| is_machine_link(root, p) || is_excluded(p, std::fs::metadata(root.join(p)).map(|m| m.len()).unwrap_or(0))).cloned().collect()
+}
+
 /// fleet/<glyph>-<slug of title>, unique among local and GitHub branches.
 pub fn branch_name(prefix: &str, glyph: &str, title: &str, exists: &dyn Fn(&str) -> bool) -> String {
     let g: String = glyph.to_lowercase().chars().filter(|c| c.is_ascii_alphanumeric()).collect();
@@ -172,7 +183,7 @@ pub fn run(inp: &Input) -> Outcome {
         return out;
     }
     let staged: Vec<String> = git.read(&["diff", "--cached", "--name-only", "-z", "--diff-filter=d"]).unwrap_or_default().split('\0').filter(|s| !s.is_empty()).map(String::from).collect();
-    out.excluded = staged.iter().filter(|p| is_excluded(p, std::fs::metadata(git.root.join(p)).map(|m| m.len()).unwrap_or(0))).cloned().collect();
+    out.excluded = excluded_paths(&git.root, &staged);
     if !out.excluded.is_empty() {
         let mut a = vec!["reset", "-q", "--"];
         a.extend(out.excluded.iter().map(|s| s.as_str()));
@@ -370,6 +381,19 @@ mod tests {
         assert!(!is_excluded("src/env.ts", 10));
         assert!(!is_excluded("keys.ts", 10));
         assert!(is_excluded("video.mp4", MAX_FILE + 1));
+    }
+
+    #[test]
+    fn absolute_symlinks_are_excluded() {
+        let d = std::env::temp_dir().join(format!("fleet-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("react")).unwrap();
+        std::os::unix::fs::symlink(d.join("react/node_modules"), d.join("react/node_modules")).unwrap();
+        std::os::unix::fs::symlink("../shared", d.join("react/shared")).unwrap();
+        std::fs::write(d.join("a.ts"), "x").unwrap();
+        let staged: Vec<String> = ["react/node_modules", "react/shared", "a.ts"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(excluded_paths(&d, &staged), vec!["react/node_modules".to_string()]);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
