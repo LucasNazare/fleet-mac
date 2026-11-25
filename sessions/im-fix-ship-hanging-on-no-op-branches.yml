@@ -15,5 +15,5 @@ recap:
 - User quits fleet and relaunches the new build themselves, since that ends this session
 - 'Fallback: build from this worktree now, but the next main build reintroduces the bug'
 lastMachine: MacBook Pro de Lucas
-updatedAt: 2026-11-25T18:30:42Z
-archived: false
+updatedAt: 2026-11-25T18:31:00Z
+archived: true

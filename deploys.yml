@@ -28,3 +28,10 @@
   machine: MacBook Pro de Lucas
   at: 2026-11-25T17:42:55Z
   result: shipped
+- tag: ship-20261125-1530
+  commit: e030b0cc21ed3841e0ac99a6836fa4c5e3b58248
+  branches:
+  - fleet/im-fix-ship-hanging-on-no-op-branches
+  machine: MacBook Pro de Lucas
+  at: 2026-11-25T18:31:00Z
+  result: shipped
