@@ -1,0 +1,7 @@
+- tag: ship-20261124-2103
+  commit: 1d95b289564c88664b165bbe98a93b4a2a01ea92
+  branches:
+  - fleet/config-20261124
+  machine: MacBook Pro de Lucas
+  at: 2026-11-25T00:03:34Z
+  result: shipped
