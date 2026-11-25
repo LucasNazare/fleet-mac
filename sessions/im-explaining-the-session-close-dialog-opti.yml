@@ -1,16 +1,17 @@
 branch: fleet/im-explaining-the-session-close-dialog-opti
 glyph: IM
 color: '#FF7B72'
-title: Explaining the session close dialog options
+title: Fix Merge dialog blocking synced projects
 titleHistory:
 - '[Image #1]'
+- Explaining the session close dialog options
 state: done
-prompts: 1
+prompts: 2
 recap:
-- 'Explained the close dialog''s two decisions: keep vs. remove the conversation, and what to do with the worktree'
-- 'Mapped each button to a situation: archive, close, merge, or delete'
-- Described what each action does to the branch and folder, including merge refusals
-- Offered a quick checklist and an optional dialog improvement
+- 'Explained the Merge error: synced projects only merge to main through Ship'
+- Work is already pushed; use ⌘⇧D to ship the branch
+- Changed ConfirmClose.tsx to show Ship instead of Merge for synced projects
+- Typecheck passes; e2e and in-app check not yet run, nothing committed
 lastMachine: MacBook Pro de Lucas
-updatedAt: 2026-11-25T00:05:51Z
+updatedAt: 2026-11-25T00:06:59Z
 archived: false
