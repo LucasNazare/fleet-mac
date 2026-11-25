@@ -1,21 +1,22 @@
 branch: fleet/im-fleet-release-build-and-manual-test
 glyph: IM
 color: '#FFA657'
-title: Fleet restarted on new merge-check build
+title: Atrium-v2 worktree cleanup safety check
 titleHistory:
 - '[Image #1]'
 - Fix Ship hanging on no-op branches
 - 'Ship: flag branches that add nothing'
 - 'Fleet fix: ship to main, then'
 - Fleet release build and manual test
+- Fleet restarted on new merge-check build
 state: done
-prompts: 5
+prompts: 6
 recap:
-- Fleet relaunched at 15:36 from the 15:34 main build
-- New merge check is included, so both fixes are live
-- The .dmg step was cut off, so no new .dmg exists
-- /Applications/fleet.app is still the old version
-- 'Verify in Ship on atrium-v2 (⌘⇧D): KN shows "Nothing new vs main"'
+- 'Checked six worktrees: none have uncommitted code, and merging would not change main'
+- Safe to close all six sessions and remove the worktrees
+- Closing a session ends its Claude chat, so archive any you may want back
+- Two remote fleet branches add nothing to main and can be deleted
+- Keep backup/repasse-fix-pre-rebase until main is confirmed to include the repasse fix
 lastMachine: MacBook Pro de Lucas
-updatedAt: 2026-11-25T18:37:33Z
+updatedAt: 2026-11-25T18:56:01Z
 archived: false
