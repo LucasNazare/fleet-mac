@@ -13,3 +13,10 @@
   machine: MacBook Pro de Lucas
   at: 2026-11-25T02:35:35Z
   result: shipped
+- tag: ship-20261125-0015
+  commit: 7da1422040f846c108517159acd9302ceaba60db
+  branches:
+  - fleet/wr-weird-behaviours
+  machine: MacBook Pro de Lucas
+  at: 2026-11-25T03:15:58Z
+  result: shipped
