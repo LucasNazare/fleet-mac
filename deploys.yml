@@ -5,3 +5,11 @@
   machine: MacBook Pro de Lucas
   at: 2026-11-25T00:03:34Z
   result: shipped
+- tag: ship-20261124-2335
+  commit: e8c644b0fea9c29b03d9192b0bd3668a8cdf3174
+  branches:
+  - fleet/im-explaining-the-session-close-dialog-opti
+  - fleet/pl-freed-10-gb-by-clearing-caches
+  machine: MacBook Pro de Lucas
+  at: 2026-11-25T02:35:35Z
+  result: shipped

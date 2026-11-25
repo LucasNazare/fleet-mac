@@ -13,5 +13,5 @@ recap:
 - Changed ConfirmClose.tsx to show Ship instead of Merge for synced projects
 - Typecheck passes; e2e and in-app check not yet run, nothing committed
 lastMachine: MacBook Pro de Lucas
-updatedAt: 2026-11-25T00:06:59Z
-archived: false
+updatedAt: 2026-11-25T02:35:35Z
+archived: true
