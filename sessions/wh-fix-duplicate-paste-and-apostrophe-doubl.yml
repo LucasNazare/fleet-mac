@@ -1,0 +1,17 @@
+branch: fleet/wh-fix-duplicate-paste-and-apostrophe-doubl
+glyph: WH
+color: '#FF7B72'
+title: Fix duplicate paste and apostrophe doubling
+titleHistory:
+- when i paste, it pastes duplicated.
+state: done
+prompts: 1
+recap:
+- Stopped browser hidden text box from re-sending pasted text
+- Fixed dead-key apostrophe doubling (let''s)
+- Added two e2e tests reproducing both bugs; they pass now
+- Existing main-flows and git-editor tests still pass
+- Nothing committed; needs a manual check in tauri dev
+lastMachine: MacBook Pro de Lucas
+updatedAt: 2026-11-25T17:13:50Z
+archived: false
