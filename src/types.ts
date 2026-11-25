@@ -135,7 +135,7 @@ export interface UsageDay {
   maxTurnMs: number;
 }
 
-export type SyncBadge = "pushed" | "waiting" | "conflict" | "paused" | "syncing" | "taken_over" | "error" | "new";
+export type SyncBadge = "pushed" | "waiting" | "conflict" | "paused" | "syncing" | "taken_over" | "error" | "new" | "behind";
 
 export interface SyncInfo {
   badge: SyncBadge;
@@ -169,6 +169,7 @@ export type BranchResult =
 export interface ShipOutcome {
   results: [string, BranchResult][]; mainCommit?: string | null; pushed: boolean; tag?: string | null;
   deployCode?: number | null; deployOutput?: string | null; error?: string | null; others: string[];
+  tips?: [string, string][]; moved?: string[];
 }
 export interface ShippedCommit { commit: string; subject: string; at: number; branch: string }
 export interface WorkflowFinding { path: string; before: string; after: string }
@@ -198,7 +199,7 @@ export interface ProjectCfg {
   localChanges: number;
   localAhead: number;
 }
-export interface SyncStatus { lastSyncAt?: number | null; offline: boolean; waiting: number; pausedAll: boolean; anySynced: boolean }
+export interface SyncStatus { lastSyncAt?: number | null; offline: boolean; waiting: number; pausedAll: boolean; anySynced: boolean; problems?: Record<string, string> }
 export interface GhStatus { installed: boolean; authed: boolean; user?: string | null; message?: string | null }
 export interface SyncCheck {
   isRepo: boolean; hasOrigin: boolean; originUrl: string; isGithub: boolean; gh: GhStatus;

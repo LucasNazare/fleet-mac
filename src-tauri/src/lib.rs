@@ -296,7 +296,11 @@ fn handle_hook(app: &AppHandle, env: hooks::Envelope) {
                 ch
             });
             if regen && !last_message.trim().is_empty() {
-                let Ok(claude) = claude_bin() else { return };
+                let Ok(claude) = claude_bin() else {
+                    // The Stop's sync waits on this entry: never leave it behind.
+                    app.state::<sync::SyncState>().titling.lock().remove(&id);
+                    return;
+                };
                 let dir = persist::app_dir().join("titler");
                 let _ = std::fs::create_dir_all(&dir);
                 match titler::generate(&claude, &settings::title_model(), &dir, &last_prompt, &last_message) {
@@ -684,7 +688,7 @@ fn close_session(id: String, archive: bool, fleet: State<Fleet>, app: AppHandle)
         s.alive = false;
     }
     if let Some(s) = store.sessions.iter().find(|s| s.id == id) {
-        sync::on_close(&app, &id, &s.branch, s.worktree_path.as_deref());
+        sync::on_close(&app, s);
     }
     fleet.ptys.kill(&id);
     let prefix = format!("console:{id}:");
@@ -1202,6 +1206,7 @@ pub fn run() {
             sync::ship_cmds::ship_info,
             sync::ship_cmds::ship_run,
             sync::ship_cmds::ship_redeploy,
+            sync::ship_cmds::ship_retry_deploy,
             sync::ship_cmds::ship_history,
             sync::ship_cmds::ship_undo,
             sync::fix::sync_fix_conflict,

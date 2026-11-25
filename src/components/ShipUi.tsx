@@ -151,6 +151,19 @@ export function ShipSheet() {
         useSync.setState((s) => ({ runs: { ...s.runs, [projectId]: { ...s.runs[projectId], running: false } } }));
       },
     });
+  const retryDeploy = async () => {
+    useSync.setState((s) => ({ runs: { ...s.runs, [projectId]: { running: true, log: "", steps: [], outcome: null } } }));
+    try {
+      const t = await invoke<string>("ship_retry_deploy", { projectId });
+      useFleet.getState().showToast(`Deployed ${t}`);
+    } catch (e) {
+      useFleet.getState().showToast(String(e), "error");
+    }
+    useSync.setState((s) => ({ runs: { ...s.runs, [projectId]: { ...s.runs[projectId], running: false } } }));
+    void load();
+  };
+  const lastDeploy = info?.deploys[info.deploys.length - 1];
+  const deployPending = !!info?.deployCommand && (lastDeploy?.result === "deploy_failed" || lastDeploy?.result === "deploy_skipped");
   const undo = (c: ShippedCommit) =>
     confirmDialog({
       title: `Undo “${c.subject}”?`,
@@ -241,9 +254,13 @@ export function ShipSheet() {
                       </button>
                     )}
                     {res && (
-                      <span className="ship-res" data-testid="ship-result" data-kind={res.kind} style={{ color: res.kind === "merged" ? "var(--green)" : res.kind === "empty" ? "var(--muted)" : "var(--red)" }}>
-                        {res.kind === "merged" ? "✓ shipped" : res.kind === "conflict" ? "⚠ conflict" : res.kind === "checksFailed" ? "✕ checks" : "nothing new"}
-                      </span>
+                      outcome && !outcome.pushed && (res.kind === "merged" || res.kind === "empty") ? (
+                        <span className="ship-res" data-testid="ship-result" data-kind="notShipped" style={{ color: "var(--muted)" }}>not shipped</span>
+                      ) : (
+                        <span className="ship-res" data-testid="ship-result" data-kind={res.kind} style={{ color: res.kind === "merged" ? "var(--green)" : res.kind === "empty" ? "var(--muted)" : "var(--red)" }}>
+                          {res.kind === "merged" ? "✓ shipped" : res.kind === "conflict" ? "⚠ conflict" : res.kind === "checksFailed" ? "✕ checks" : "nothing new"}
+                        </span>
+                      )
                     )}
                   </div>
                 );
@@ -258,7 +275,7 @@ export function ShipSheet() {
             )}
             {outcome && !running && (
               <div className={`ship-summary ${outcome.error ? "bad" : ""}`} data-testid="ship-summary">
-                {outcome.error ? `✕ ${outcome.error}` : <>
+                {outcome.error ? `✕ ${outcome.error}${outcome.pushed ? "" : " Nothing was shipped; every branch is unchanged."}` : <>
                   ✓ {outcome.results.filter(([, r]) => r.kind === "merged").length} shipped
                   {outcome.tag && <> · tagged <code>{outcome.tag}</code></>}
                   {outcome.deployCode != null && (outcome.deployCode === 0 ? " · deployed" : ` · deploy failed (exit ${outcome.deployCode}) — main stays as pushed; fix forward or Redeploy previous`)}
@@ -283,10 +300,13 @@ export function ShipSheet() {
               <div key={d.tag + d.at} className="deploy-row" data-testid="deploy-row">
                 <code>{d.tag}</code>
                 <span className="muted small">{ago(d.at)} · {d.machine} · {d.branches.length} feature{d.branches.length === 1 ? "" : "s"}</span>
-                <span className="small" style={{ color: d.result === "deploy_failed" ? "var(--red)" : "var(--green)" }}>{d.result.replace("_", " ")}</span>
+                <span className="small" style={{ color: d.result === "deploy_failed" ? "var(--red)" : d.result === "deploy_skipped" ? "var(--muted)" : "var(--green)" }}>{d.result.replace("_", " ")}</span>
                 {info.deployCommand && d.result === "deployed" && <button className="link" onClick={() => redeploy(d.tag)}>redeploy</button>}
               </div>
             ))}
+            {deployPending && (
+              <button className="btn small primary" onClick={() => void retryDeploy()} disabled={running} data-testid="retry-deploy">Retry deploy of main</button>
+            )}
             {info.deployCommand && deployedCount > 1 && (
               <button className="btn small danger" onClick={() => redeploy()} disabled={running} data-testid="redeploy-previous">Redeploy previous</button>
             )}

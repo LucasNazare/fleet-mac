@@ -401,6 +401,7 @@ export function createMockBackend(): Backend {
       setTimeout(() => emit("ship-done", { projectId, outcome }), 0);
       return outcome;
     },
+    ship_retry_deploy: ({ projectId }) => { emit("ship-log", { projectId, text: "$ ./deploy.sh all\n[exit 0]\n" }); const tag = `deploy-retry-${deploys.length}`; deploys.push({ tag, commit: "abc123", branches: [], machine: "This Mac", at: new Date().toISOString(), result: "deployed" }); return tag; },
     ship_redeploy: ({ projectId }) => { emit("ship-log", { projectId, text: "$ ./deploy.sh all\n[exit 0]\n" }); const prev = deploys[deploys.length - 2]; if (!prev) throw new Error("There's no previous deploy to go back to."); deploys.push({ ...prev, tag: `${prev.tag} (redeployed)`, result: "redeployed", at: new Date().toISOString() }); return prev.tag; },
     ship_history: () => deploys.flatMap((d) => d.branches.map((b: string) => ({ commit: `c-${b}`, subject: `Feature ${b}`, at: Math.floor(Date.now() / 1000), branch: b }))),
     ship_undo: ({ projectId, commit }) => { const b = `fleet/revert-${commit}`; others.push({ projectId, branch: b, glyph: "↶", color: "#8B949E", title: `Undo: ${commit}`, recap: [], state: "done", prompts: 0, lastMachine: "MacBook Pro", updatedAt: new Date().toISOString(), commits: 1, needsRebase: false }); emit("sync-others", [...others]); return b; },

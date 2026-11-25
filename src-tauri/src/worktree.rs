@@ -50,11 +50,27 @@ pub fn prepare(root: &Path, wt: &Path) -> Vec<String> {
         let rel = entry.trim_end_matches('/');
         let name = rel.rsplit('/').next().unwrap_or(rel);
         let (src, dst) = (root.join(rel), wt.join(rel));
-        let Ok(meta) = std::fs::symlink_metadata(&src) else { continue };
-        if meta.file_type().is_symlink() || std::fs::symlink_metadata(&dst).is_ok() {
+        let Ok(lmeta) = std::fs::symlink_metadata(&src) else { continue };
+        if std::fs::symlink_metadata(&dst).is_ok() {
             continue;
         }
+        // The worktree's own ignore rules (GitHub's .gitignore) must cover it too, or the
+        // next Stop would commit the copy.
+        let probe = if std::fs::metadata(&src).map(|m| m.is_dir()).unwrap_or(false) { format!("{rel}/") } else { rel.to_string() };
+        if git(wt, &["check-ignore", "-q", "--no-index", "--", &probe]).is_err() {
+            continue;
+        }
+        let is_env = name.starts_with(".env");
+        // A linked node_modules is never followed; a linked .env is copied as its contents.
+        if lmeta.file_type().is_symlink() && !is_env {
+            continue;
+        }
+        let Ok(meta) = std::fs::metadata(&src) else { continue };
         let ok = if name == "node_modules" && meta.is_dir() {
+            // Dependencies installed for other lockfiles are worse than none: setup installs.
+            if !same_lockfiles(src.parent().unwrap_or(root), dst.parent().unwrap_or(wt)) {
+                continue;
+            }
             if let Some(parent) = dst.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
@@ -63,7 +79,7 @@ pub fn prepare(root: &Path, wt: &Path) -> Vec<String> {
                 let _ = std::fs::remove_dir_all(&dst);
             }
             ok
-        } else if name.starts_with(".env") && meta.is_file() {
+        } else if is_env && meta.is_file() {
             dst.parent().map(|p| std::fs::create_dir_all(p).is_ok()).unwrap_or(false) && std::fs::copy(&src, &dst).is_ok()
         } else {
             false
@@ -73,6 +89,12 @@ pub fn prepare(root: &Path, wt: &Path) -> Vec<String> {
         }
     }
     added
+}
+
+/// Every lockfile next to node_modules is byte-identical in both folders (missing in both
+/// counts as identical).
+fn same_lockfiles(a: &Path, b: &Path) -> bool {
+    ["package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb", "bun.lock"].iter().all(|f| std::fs::read(a.join(f)).ok() == std::fs::read(b.join(f)).ok())
 }
 
 fn prepare_in_background(root: &Path, wt: &Path) {
@@ -89,6 +111,8 @@ pub fn create(root: &Path, title: &str) -> Result<String, String> {
     let path = base.join(&slug);
     std::fs::create_dir_all(&base).map_err(|e| e.to_string())?;
     processes::exclude_locally(root, ".fleet/").map_err(|e| e.to_string())?;
+    // Entries for worktree folders deleted by hand would block the add.
+    let _ = git(root, &["worktree", "prune"]);
     git(root, &["worktree", "add", &path.to_string_lossy(), "-b", &format!("fleet/{slug}")])?;
     prepare_in_background(root, &path);
     Ok(path.to_string_lossy().into())
@@ -102,6 +126,7 @@ pub fn create_detached(root: &Path, title: &str, base: &str) -> Result<String, S
     let path = base_dir.join(&slug);
     std::fs::create_dir_all(&base_dir).map_err(|e| e.to_string())?;
     processes::exclude_locally(root, ".fleet/").map_err(|e| e.to_string())?;
+    let _ = git(root, &["worktree", "prune"]);
     git(root, &["worktree", "add", "--detach", &path.to_string_lossy(), base])?;
     prepare_in_background(root, &path);
     Ok(path.to_string_lossy().into())
@@ -191,6 +216,31 @@ mod tests {
         assert!(!std::fs::symlink_metadata(wt.join("web/node_modules")).unwrap().file_type().is_symlink());
         assert_eq!(std::fs::read_to_string(wt.join(".env.local")).unwrap(), "mine", "existing files are left alone");
         assert!(prepare(&d, &wt).is_empty());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn prepare_is_careful() {
+        let d = std::env::temp_dir().join(format!("fleet-prep2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("web/node_modules/x")).unwrap();
+        std::fs::create_dir_all(d.join("shared")).unwrap();
+        let sh = |c: &str| assert!(Command::new("/bin/sh").arg("-c").arg(c).current_dir(&d).status().unwrap().success());
+        sh("git init -q -b main && printf 'node_modules/\\n.env\\nscratch/\\n' > .gitignore && echo v1 > web/package-lock.json && git add -A && git -c user.name=t -c user.email=t@t commit -qm i");
+        std::fs::write(d.join("shared/env"), "K=1").unwrap();
+        std::os::unix::fs::symlink(d.join("shared/env"), d.join(".env")).unwrap();
+        // Ignored only by the main folder's uncommitted rule: never copied.
+        std::fs::create_dir_all(d.join("scratch")).unwrap();
+        std::fs::write(d.join(".git/info/exclude"), "local-only/\n").unwrap();
+        std::fs::create_dir_all(d.join("local-only/node_modules")).unwrap();
+        let wt = d.join("wt");
+        sh("git worktree add -q --detach wt");
+        // The worktree's lockfile differs: its deps must be installed, not cloned.
+        std::fs::write(wt.join("web/package-lock.json"), "v2\n").unwrap();
+        let added = prepare(&d, &wt);
+        assert_eq!(added, vec![".env"], "{added:?}");
+        assert!(!std::fs::symlink_metadata(wt.join(".env")).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_to_string(wt.join(".env")).unwrap(), "K=1");
         let _ = std::fs::remove_dir_all(&d);
     }
 }

@@ -105,7 +105,13 @@ pub fn start_in(app: &AppHandle, project_id: &str, def_id: &str, cols: u16, rows
         let root = PathBuf::from(&project.root_path);
         let sub = if def.cwd.is_empty() { "." } else { &def.cwd };
         let dirs = [root.clone(), root.join(sub), base.clone(), cwd.clone()];
-        for (k, v) in dotenv_values(&dirs, &def.env_from) {
+        let vals = dotenv_values(&dirs, &def.env_from);
+        let missing: Vec<&String> = def.env_from.iter().filter(|n| !vals.iter().any(|(k, _)| k == *n)).collect();
+        if !missing.is_empty() {
+            let names: Vec<&str> = missing.iter().map(|s| s.as_str()).collect();
+            let _ = app.emit("toast", format!("{}: {} not found in any .env file — it starts without {}.", def.name, names.join(", "), if names.len() == 1 { "it" } else { "them" }));
+        }
+        for (k, v) in vals {
             cmd.env(k, v);
         }
     }

@@ -147,6 +147,9 @@ pub async fn ship_info(app: AppHandle, project_id: String) -> Result<ShipInfo, S
 }
 
 /// Shell command with the login env; output streamed as `ship-log` events.
+/// Longest a check, setup or deploy command may run before Ship stops it.
+const SHIP_CMD_TIMEOUT: Duration = Duration::from_secs(45 * 60);
+
 fn streaming_runner(app: &AppHandle, project_id: &str) -> impl Fn(&Path, &str) -> (i32, String) {
     let (app, pid) = (app.clone(), project_id.to_string());
     move |dir: &Path, cmd: &str| {
@@ -155,6 +158,7 @@ fn streaming_runner(app: &AppHandle, project_id: &str) -> impl Fn(&Path, &str) -
         };
         emit(&format!("\n$ {cmd}\n"));
         let shell = crate::shell_env::login_env().get("SHELL").cloned().unwrap_or_else(|| "/bin/zsh".into());
+        use std::os::unix::process::CommandExt;
         let child = std::process::Command::new(shell)
             .arg("-c")
             .arg(format!("exec 2>&1; {cmd}"))
@@ -165,6 +169,8 @@ fn streaming_runner(app: &AppHandle, project_id: &str) -> impl Fn(&Path, &str) -
             .env("FLEET_SHIP", "1")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
+            // Its own process group: a timeout stops everything it started.
+            .process_group(0)
             .spawn();
         let mut child = match child {
             Ok(c) => c,
@@ -173,23 +179,70 @@ fn streaming_runner(app: &AppHandle, project_id: &str) -> impl Fn(&Path, &str) -
                 return (-1, e.to_string());
             }
         };
-        let mut all = String::new();
-        let mut buf = [0u8; 4096];
+        // Output is read on its own thread: something the command left running in the
+        // background (a daemon, `nohup … &`) can hold the pipe open after the command ends,
+        // and that mustn't keep Ship waiting forever.
         let mut stdout = child.stdout.take().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            while let Ok(n) = stdout.read(&mut buf) {
+                if n == 0 || tx.send(String::from_utf8_lossy(&buf[..n]).to_string()).is_err() {
+                    break;
+                }
+            }
+        });
+        let started = std::time::Instant::now();
+        let mut all = String::new();
+        let mut exited: Option<(i32, std::time::Instant)> = None;
+        let mut timed_out = false;
         loop {
-            match stdout.read(&mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    let t = String::from_utf8_lossy(&buf[..n]).to_string();
+            match rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(t) => {
                     emit(&t);
                     all.push_str(&t);
                     if all.len() > 200_000 {
-                        all.drain(..100_000);
+                        let mut cut = 100_000;
+                        while !all.is_char_boundary(cut) {
+                            cut += 1;
+                        }
+                        all.drain(..cut);
                     }
                 }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            }
+            if exited.is_none() {
+                if let Ok(Some(st)) = child.try_wait() {
+                    exited = Some((st.code().unwrap_or(-1), std::time::Instant::now()));
+                }
+            }
+            match exited {
+                // Exited; give its last output 3 s, then stop reading.
+                Some((_, at)) if at.elapsed() > Duration::from_secs(3) => break,
+                None if started.elapsed() > SHIP_CMD_TIMEOUT => {
+                    timed_out = true;
+                    unsafe {
+                        libc::killpg(child.id() as i32, libc::SIGTERM);
+                    }
+                    std::thread::sleep(Duration::from_secs(5));
+                    unsafe {
+                        libc::killpg(child.id() as i32, libc::SIGKILL);
+                    }
+                    let _ = child.wait();
+                    break;
+                }
+                _ => {}
             }
         }
-        let code = child.wait().map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
+        let code = match exited {
+            Some((c, _)) => c,
+            None if timed_out => {
+                emit(&format!("\n[stopped after {} min]\n", SHIP_CMD_TIMEOUT.as_secs() / 60));
+                -2
+            }
+            None => child.wait().map(|s| s.code().unwrap_or(-1)).unwrap_or(-1),
+        };
         emit(&format!("[exit {code}]\n"));
         (code, all)
     }
@@ -216,7 +269,10 @@ fn pr_merge(app: &AppHandle, project_id: &str) -> impl Fn(&Git, &str, &str) -> R
                 _ => std::thread::sleep(Duration::from_secs(10)),
             }
         }
-        Err("The pull request didn't merge within 30 minutes; it will merge when GitHub's required checks pass.".into())
+        // Not merged in time: disarm auto-merge so it can't land later without a deploy, tag or
+        // cleanup. The PR stays open on GitHub; the next Ship starts from scratch.
+        let _ = ghc(&["pr", "merge", head, "--disable-auto"]);
+        Err("The pull request didn't merge within 30 minutes. Auto-merge was turned off and nothing was shipped; the pull request is still open on GitHub.".into())
     }
 }
 
@@ -296,6 +352,11 @@ fn run_ship(app: &AppHandle, p: &Project, branches: &[String]) -> Result<ship::S
         stamp: ship::ship_stamp(),
     };
     let out = ship::ship(&input);
+    // main didn't move (offline, rejected, PR not merged): nothing was shipped, every branch
+    // and session stays exactly as it was.
+    if !out.pushed {
+        return Ok(out);
+    }
     // Sessions: shipped ones start fresh from the new main; skipped ones are told why.
     for (b, r) in &out.results {
         let Some(s) = local.iter().find(|s| &s.branch == b) else { continue };
@@ -358,16 +419,18 @@ pub async fn ship_redeploy(app: AppHandle, project_id: String, tag: Option<Strin
         let git = git_for(&app, &p.root_path);
         let _ = git.run(&["fetch", "--prune", "--tags", "origin"]);
         let log = state_branch::read_deploys(&git, state_branch::REMOTE);
-        let deployed: Vec<&state_branch::DeployEntry> = log.iter().filter(|d| d.result == "deployed").collect();
         let tag = match tag {
             Some(t) => t,
-            None => deployed.iter().rev().nth(1).map(|d| d.tag.clone()).ok_or("There's no previous deploy to go back to.")?,
+            None => ship::previous_deploy(&log).ok_or("There's no previous deploy to go back to.")?,
         };
+        if git.rev(&format!("refs/tags/{tag}")).is_none() {
+            return Err(format!("The tag {tag} isn't on GitHub or this Mac, so it can't be redeployed."));
+        }
         if !shipping().lock().insert(p.id.clone()) {
             return Err("A Ship is already running for this project.".into());
         }
         let run = streaming_runner(&app, &p.id);
-        let (code, _) = ship::redeploy(&git, &PathBuf::from(&p.root_path).join(".fleet").join("deploy"), &tag, conf.sync.setup.as_deref(), &cmd, &run);
+        let (code, _) = ship::redeploy(&git, &PathBuf::from(&p.root_path).join(".fleet").join("deploy"), &format!("refs/tags/{tag}"), conf.sync.setup.as_deref(), &cmd, &run);
         shipping().lock().remove(&p.id);
         let mut log = state_branch::read_deploys(&git, state_branch::REMOTE);
         log.push(state_branch::DeployEntry {
@@ -379,6 +442,51 @@ pub async fn ship_redeploy(app: AppHandle, project_id: String, tag: Option<Strin
             result: if code == 0 { "redeployed".into() } else { "deploy_failed".into() },
         });
         if state_branch::write(&git, &[("deploys.yml".into(), Some(state_branch::to_yaml(&log)))], &format!("state: redeploy {tag}")).is_ok() {
+            load::push_state(&git);
+        }
+        let _ = app.emit("ship-done", serde_json::json!({ "projectId": p.id }));
+        if code == 0 { Ok(tag) } else { Err(format!("The deploy command failed (exit {code}) — see the log.")) }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// The last Ship pushed main but its deploy failed or was skipped: run the deploy again at
+/// GitHub's main (exactly what's shipped) and tag it like a normal deploy.
+#[tauri::command]
+pub async fn ship_retry_deploy(app: AppHandle, project_id: String) -> Result<String, String> {
+    let p = project(&app, &project_id)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let c = cfg(&app, &p.id).filter(|c| c.enabled).ok_or("GitHub sync isn't on.")?;
+        let conf = c.config.clone().ok_or("fleet.yml is missing.")?;
+        let cmd = conf.sync.deploy_command.clone().filter(|d| !d.trim().is_empty()).ok_or("fleet.yml has no deployCommand.")?;
+        let git = git_for(&app, &p.root_path);
+        git.run(&["fetch", "--prune", "origin"]).map_err(|e| format!("Couldn't reach GitHub: {e}"))?;
+        let main = git.rev(&format!("refs/remotes/origin/{}", c.default_branch)).ok_or("GitHub has no main.")?;
+        if !shipping().lock().insert(p.id.clone()) {
+            return Err("A Ship is already running for this project.".into());
+        }
+        let run = streaming_runner(&app, &p.id);
+        let (code, _) = ship::redeploy(&git, &PathBuf::from(&p.root_path).join(".fleet").join("deploy"), &main, conf.sync.setup.as_deref(), &cmd, &run);
+        shipping().lock().remove(&p.id);
+        let mut tag = format!("deploy-{}", ship::ship_stamp());
+        if git.rev(&format!("refs/tags/{tag}")).is_some() {
+            tag = format!("{tag}-{}", &main[..6]);
+        }
+        if code == 0 && git.run(&["tag", &tag, &main]).is_ok() {
+            let r = format!("refs/tags/{tag}");
+            let _ = pusher::push(&git, &[pusher::Refspec::new(&r, &r)], &[], None);
+        }
+        let mut log = state_branch::read_deploys(&git, state_branch::REMOTE);
+        log.push(state_branch::DeployEntry {
+            tag: if code == 0 { tag.clone() } else { format!("{tag}-failed") },
+            commit: main.clone(),
+            branches: vec![],
+            machine: machine_name(),
+            at: state_branch::now_stamp(),
+            result: if code == 0 { "deployed".into() } else { "deploy_failed".into() },
+        });
+        if state_branch::write(&git, &[("deploys.yml".into(), Some(state_branch::to_yaml(&log)))], &format!("state: retry deploy {tag}")).is_ok() {
             load::push_state(&git);
         }
         let _ = app.emit("ship-done", serde_json::json!({ "projectId": p.id }));

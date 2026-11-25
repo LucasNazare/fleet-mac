@@ -447,6 +447,7 @@ body.resizing-v * { pointer-events: none; }
 .sync-pill { font-size: 11px; margin-left: 4px; }
 .sync-status-wrap { position: relative; }
 .sync-menu { position: fixed; min-width: 230px; z-index: 60; }
+.menu-note { padding: 6px 10px; max-width: 320px; color: var(--red); border-bottom: 1px solid var(--border); margin-bottom: 4px; }
 .sync-steps { display: flex; flex-direction: column; gap: 6px; margin: 10px 0 6px; }
 .sync-step { display: flex; align-items: center; gap: 8px; }
 .sync-step-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

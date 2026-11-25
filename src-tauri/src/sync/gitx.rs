@@ -66,7 +66,7 @@ impl Git {
         c.env("GIT_TERMINAL_PROMPT", "0").env("LC_MESSAGES", "C").env("GIT_PAGER", "cat").env("GIT_EDITOR", "true");
         let has_ssh_cmd = self.env.as_ref().map(|e| e.contains_key("GIT_SSH_COMMAND")).unwrap_or_else(|| std::env::var_os("GIT_SSH_COMMAND").is_some());
         if !has_ssh_cmd {
-            c.env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes -o ConnectTimeout=15");
+            c.env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=4");
         }
         // Fall back to a fleet identity only when the user has none configured.
         c

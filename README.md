@@ -220,18 +220,24 @@ another project.
 - **Every session gets its own worktree** (detached at `origin/main`). When its first prompt finishes it gets a
   branch `fleet/<glyph>-<slug of title>`.
 - **After every finished prompt** fleet does the following:
-  1. Stages everything except `.env*`, `*.pem`, `*.key`, `id_rsa*`, files over 5 MB and anything in `.gitignore`.
-     Excluded files are flagged in the git panel.
+  1. Stages everything except `.env*` (`.env.example`/`.sample`/`.template` are kept), `*.pem`, `*.key`, `id_rsa*`,
+     files over 5 MB, anything in `.gitignore`, symlinks that only work on this machine (absolute, leaving the repo,
+     broken, or standing where an ignored folder would be) and nested repos that aren't submodules. Excluded files are
+     flagged in the git panel. More than 3000 new files in one prompt pauses sync with where they are (usually
+     dependencies or build output missing from `.gitignore`).
   2. Commits with a `claude -p` message plus the trailers `Fleet-Session`, `Fleet-Title`, `Fleet-Machine` and
      `Fleet-Prompt`. Hooks are skipped (`--no-verify`); checks run at Ship.
   3. Writes the session's file on the `fleet-state` branch, using git plumbing with no checkout.
   4. Pushes both in one atomic push. If GitHub rejects it, fleet fetches, replays the state commit or rebases the
      branch, and retries. A conflict marks the session "● needs you". Offline pushes queue and retry with backoff
      (5 s up to 5 min).
-- Quitting or sleeping while a session is mid-prompt makes a `wip:` commit and pushes it (`sync.wipOnQuit`).
+- Quitting or sleeping while a session is mid-prompt makes a `wip:` commit and pushes it (`sync.wipOnQuit`). Closing a
+  session with uncommitted edits (an interrupted turn) does the same.
 - fleet fetches at launch, every `fetchIntervalSec` (120 s), and when the window regains focus.
-- Badges show ✓ pushed / ↑ n waiting / ⚠ conflict / ⏸ paused. The status bar shows "✓ synced 20s ago" or
-  "offline · n waiting"; click it for the sync log, Sync now, or Pause.
+- Badges show ✓ pushed / ↑ n waiting / ⚠ conflict / ⏸ paused / ↓ behind GitHub (the worktree couldn't take newer
+  commits). The status bar shows "✓ synced 20s ago", "offline · n waiting", or "⚠ GitHub: <project>" when GitHub
+  refuses fleet's sign-in or access (never mistaken for offline); click it for the reason, the sync log, Sync now, or
+  Pause. Unfinished syncs (crash, pause) are re-run, never relabeled as pushed.
 - **main changes only through Ship.** Pushes go through `src-tauri/src/sync/pusher.rs`, which refuses
   main without a `ship::MainPush` token that only Ship can create. The git panel's Push is blocked on main in synced
   projects.
@@ -239,33 +245,47 @@ another project.
 
 **Local work.** If a synced project's folder has uncommitted changes, unsynced commits or sessions from before sync,
 the project shows *"Keep as sessions"*. Files a session edited move into that session's own worktree (its conversation
-is moved too and carries on); everything else becomes a **Local changes** session. All of it is pushed, and the folder
-goes back to matching GitHub. Nothing is deleted.
+is moved too and carries on) on top of GitHub's main; everything else, plus commits GitHub doesn't have, becomes a
+**Local changes** session. All of it is pushed, and the folder goes back to matching GitHub. Nothing is deleted: if a
+step fails the folder's changes are put back, and fleet refuses when local main has commits a reset would strand.
 
 **Other Macs.** After every fetch fleet reads `fleet-state`:
 - Local sessions take newer titles, colours and recaps from their files.
-- Files whose branch is gone are archived.
+- Files whose branch is gone are archived. A local session whose branch was shipped (here or on another Mac) runs a
+  sync pass: with nothing after what Ship squashed (`shippedTip`), its worktree goes back to main; newer commits move
+  to a new branch on top of main, so already-shipped work is never pushed or shipped again.
 - A clean main folder is fast-forwarded, and dev processes restart if dependencies changed.
+  If it can't be (local changes, another branch, own commits), a toast says it's behind, once per GitHub commit,
+  since scripts run from it — a hand-run deploy too — would use the old code.
 - Sessions with no local copy appear under **On other computers** with their machine and age.
 - **Continue here** creates a worktree on the branch and starts claude primed with the recap, commits and diffstat. With
   the opt-in `sync.chatSync` (private repos only, secrets redacted) it resumes the same conversation instead.
 - **Presence.** While a session is open, `refs/fleet/presence/<branch>` on GitHub names the Mac that has it. Every push
   carries a lease on it, so two Macs never push the same branch. Another Mac's fresh presence shows "active on iMac ·
   3m ago" with **Take over**, and closing a session releases it.
-- **+ From GitHub** (sidebar) lists your repos (`gh repo list`), clones one and loads its sessions.
+- **+ From GitHub** (sidebar) lists your repos (`gh repo list`), clones one, runs `sync.setup` and loads its sessions.
+- Session worktrees (and Continue here) get the main folder's gitignored `.env*` files and an APFS clone of
+  `node_modules` (only when the lockfiles match and the worktree's own rules ignore it), then `sync.setup`. When a
+  fast-forward or rebase changes a lockfile, setup runs again and that folder's dev processes restart.
+- A fleet.yml edit saved offline is pushed after the next fetch, and the local override is dropped once main has it.
 
 **Ship (⌘⇧D)** lists branches that are done, pushed and ahead of main; settings changes and undo branches are included.
 Tick and drag to set the order, then Ship:
-1. In a temporary worktree at `origin/main` (`.fleet/deploy`, after `sync.setup`), each branch is merged (squash by
+1. In a temporary worktree at `origin/main` (`.fleet/deploy`; it gets the main folder's gitignored `.env*` files and an APFS clone of its `node_modules`, then `sync.setup` runs), each branch is merged (squash by
    default) and the fleet.yml checks are run. A conflict or failing check skips that branch: its session is set to
    "● needs you" and gets the output as its next message. For a conflict, an open idle session is asked to fix it
    right away; otherwise the session shows ⚠ conflict.
 2. main is pushed fast-forward only, with a lease. If main moved, Ship starts over once. With `mainIsProtected`, a PR is
-   opened and auto-merged instead.
-3. `deployCommand`, if set, runs at exactly the pushed commit. Then `deploy-`/`ship-YYYYMMDD-HHMM` is tagged and
-   `deploys.yml` gets an entry.
-4. Merged branches are deleted on GitHub, and their sessions continue on a fresh worktree from the new main. Other
-   branches are rebased and force-pushed with a lease, by the Mac that holds them (`needsRebase` otherwise).
+   opened and auto-merged instead (not merged within 30 min: auto-merge is turned off, nothing counts as shipped). If
+   main isn't pushed, no branch or session is touched and the rows say "not shipped".
+3. `deployCommand`, if set, runs at exactly the pushed commit in a tree reset to it (files a check rewrote don't leak),
+   and only while it's still GitHub's main (a newer Ship from another Mac owns the deploy; logged `deploy_skipped`).
+   Then `deploy-`/`ship-YYYYMMDD-HHMM` is tagged (pushed again by the next Ship if GitHub refused it) and
+   `deploys.yml` gets an entry. Commands run in their own process group and stop after 45 min.
+4. Merged branches are deleted on GitHub only while they still point at what was squashed; a branch that gained a
+   commit during the Ship stays, and its new commits move to a new branch (see Other Macs). Their sessions continue
+   on main. Other branches are rebased and force-pushed with a lease, by the Mac that holds them (`needsRebase`
+   otherwise).
 
 **Fix with Claude** (on a conflicting Ship row, or click a session's ⚠ conflict badge) hands the conflict to claude: the
 branch's own session (prompted if open, resumed with `--resume` if closed or archived), else a new session on a worktree
@@ -274,7 +294,8 @@ the branch, resolves, runs the checks and commits; fleet's normal push after the
 branch can ship again. A rebase left behind by sync is aborted first. Only with `mergeStyle: rebase` does claude rebase
 instead; that push replaces GitHub's branch with a lease on the commit it had (`SyncState.rewrite`, `src-tauri/src/sync/fix.rs`).
 
-History offers **Redeploy previous** (runs the deploy at the previous tag; main is untouched) and **Undo** per feature
+History offers **Redeploy previous** (the newest good deploy older than what's live; main is untouched), **Retry
+deploy** when the last deploy failed or was skipped (runs it at GitHub's main and tags it), and **Undo** per feature
 (a revert on a new branch that ships next time). The GitHub sync dialog warns when Actions run on every branch push and,
 after showing the change, limits them to main and ship/deploy tags on a settings branch.
 

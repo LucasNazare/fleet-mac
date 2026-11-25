@@ -63,6 +63,11 @@ pub struct ShipOutcome {
     pub error: Option<String>,
     /// Branches still open after this Ship (they need a rebase onto the new main).
     pub others: Vec<String>,
+    /// GitHub's tip of each merged branch when it was squashed: (branch, sha). Commits after
+    /// it weren't shipped and move to a new branch (see autocommit::carry_over).
+    pub tips: Vec<(String, String)>,
+    /// Merged branches that gained commits during the Ship: not deleted, carried over instead.
+    pub moved: Vec<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -122,6 +127,8 @@ fn prepare(inp: &ShipInput, base: &str) -> Result<Git, String> {
         let _ = std::fs::create_dir_all(parent);
     }
     g.run(&["worktree", "add", "-q", "--detach", &dir, base]).map_err(|e| e.to_string())?;
+    // Gitignored files the build needs (.env*, node_modules), as in session worktrees.
+    crate::worktree::prepare(&g.root, &inp.deploy_dir);
     let dg = g.at(&inp.deploy_dir);
     if let Some(setup) = inp.setup.as_deref().filter(|s| !s.trim().is_empty()) {
         step(inp, &format!("setup: {setup}"), None, None);
@@ -186,7 +193,35 @@ fn merge_one(inp: &ShipInput, dg: &Git, head: &str, b: &ShipBranch) -> Result<Op
             dg.run_with(&["commit", "-q", "--no-verify", "-F", "-"], &ident, Some(msg.as_bytes()), true).map_err(|e| BranchResult::Conflict { files: vec![], output: e.to_string() })?;
         }
     }
+    // Checks may have rewritten tracked files (formatters, lockfiles, codegen): none of that
+    // was committed, and none of it may leak into the next merge or the deploy.
+    clean_tree(dg);
     Ok(dg.rev("HEAD"))
+}
+
+/// Back to exactly HEAD; gitignored files (.env, node_modules) stay.
+fn clean_tree(dg: &Git) {
+    let _ = dg.run(&["reset", "-q", "--hard"]);
+    let _ = dg.run(&["clean", "-fdq"]);
+}
+
+/// Ship/deploy tags made here that never reached GitHub (it refused or was unreachable).
+pub fn push_pending_tags(g: &Git) {
+    let local = g.read(&["tag", "-l", "deploy-*", "ship-*"]).unwrap_or_default();
+    let Ok(remote) = g.read(&["ls-remote", "--tags", "origin"]) else { return };
+    let specs: Vec<Refspec> = local
+        .lines()
+        .filter(|t| !t.is_empty() && !remote.contains(&format!("refs/tags/{t}")))
+        .map(|t| Refspec::new(&format!("refs/tags/{t}"), &format!("refs/tags/{t}")))
+        .collect();
+    if !specs.is_empty() {
+        let _ = pusher::push(g, &specs, &[], None);
+    }
+}
+
+fn is_protected_rejection(msg: &str) -> bool {
+    let m = msg.to_lowercase();
+    m.contains("protected branch") || m.contains("gh006") || m.contains("gh013") || m.contains("repository rule violations")
 }
 
 pub fn ship(inp: &ShipInput) -> ShipOutcome {
@@ -201,6 +236,7 @@ pub fn ship(inp: &ShipInput) -> ShipOutcome {
             out.error = Some(format!("Couldn't reach GitHub: {e}"));
             return out;
         }
+        push_pending_tags(g);
         let Some(base) = g.rev(&main_ref) else {
             out.error = Some(format!("origin/{} doesn't exist", inp.default_branch));
             return out;
@@ -220,13 +256,18 @@ pub fn ship(inp: &ShipInput) -> ShipOutcome {
                 out.results.push((b.branch.clone(), BranchResult::Conflict { files: vec![], output: format!("{} isn't on GitHub", b.branch) }));
                 continue;
             }
+            let tip = g.rev(&format!("refs/remotes/origin/{}", b.branch)).unwrap_or_default();
             match merge_one(inp, &d, &head, b) {
                 Ok(Some(h)) => {
                     head = h.clone();
                     step(inp, "merged", Some(&b.branch), Some(true));
                     out.results.push((b.branch.clone(), BranchResult::Merged { commit: h }));
+                    out.tips.push((b.branch.clone(), tip));
                 }
-                Ok(None) => out.results.push((b.branch.clone(), BranchResult::Empty)),
+                Ok(None) => {
+                    out.results.push((b.branch.clone(), BranchResult::Empty));
+                    out.tips.push((b.branch.clone(), tip));
+                }
                 Err(r) => {
                     step(inp, "skipped", Some(&b.branch), Some(false));
                     out.results.push((b.branch.clone(), r));
@@ -249,8 +290,25 @@ pub fn ship(inp: &ShipInput) -> ShipOutcome {
                     cleanup(inp);
                     return out;
                 }
-                let _ = g.run(&["fetch", "--prune", "origin"]);
-                out.main_commit = g.rev(&main_ref);
+                // Deploy only the main that contains the merge, never the old one.
+                let mut now = None;
+                for i in 0..5 {
+                    if g.run(&["fetch", "--prune", "origin"]).is_ok() {
+                        now = g.rev(&main_ref).filter(|m| m != &base);
+                        if now.is_some() {
+                            break;
+                        }
+                    }
+                    if i < 4 {
+                        std::thread::sleep(std::time::Duration::from_secs(5));
+                    }
+                }
+                if now.is_none() {
+                    out.error = Some("The pull request merged on GitHub, but fleet couldn't fetch the new main, so nothing was deployed or cleaned up. Press Refresh when GitHub is reachable; the merged features show as already shipped.".into());
+                    cleanup(inp);
+                    return out;
+                }
+                out.main_commit = now;
                 out.pushed = true;
             } else {
                 out.error = Some("Couldn't push the ship branch for the pull request.".into());
@@ -268,6 +326,11 @@ pub fn ship(inp: &ShipInput) -> ShipOutcome {
                 dg = Some(d);
                 break;
             }
+            PushOutcome::Rejected(_, m) if is_protected_rejection(&m) => {
+                cleanup(inp);
+                out.error = Some(format!("GitHub protects {} and refused the push. Turn on mainIsProtected in fleet.yml so Ship merges through a pull request.", inp.default_branch));
+                return out;
+            }
             PushOutcome::Rejected(..) | PushOutcome::LeaseLost(..) if attempt == 0 => {
                 step(inp, "main moved on GitHub — starting again", None, None);
                 continue;
@@ -284,16 +347,29 @@ pub fn ship(inp: &ShipInput) -> ShipOutcome {
         out.error.get_or_insert_with(|| "main moved twice during Ship; try again.".into());
         return out;
     };
-    // Deploy at exactly the pushed commit.
+    // Deploy at exactly the pushed commit, and only while it's still main: if another Mac
+    // shipped on top meanwhile, its deploy is the newer one and ours must not land after it.
     let mut deployed_ok = true;
+    let mut skipped = false;
     if let Some(cmd) = inp.deploy_command.as_deref().filter(|c| !c.trim().is_empty()) {
-        let _ = d.run(&["checkout", "-q", "--detach", &main_commit]);
-        step(inp, &format!("deploy: {cmd}"), None, None);
-        let (code, o) = (inp.run)(&inp.deploy_dir, cmd);
-        out.deploy_code = Some(code);
-        out.deploy_output = Some(tail(&o, 6000));
-        deployed_ok = code == 0;
-        step(inp, "deploy", None, Some(deployed_ok));
+        clean_tree(&d);
+        let _ = g.run(&["fetch", "-q", "origin", &inp.default_branch]);
+        let at = d.run(&["checkout", "-q", "--detach", &main_commit]).is_ok();
+        if g.rev(&main_ref).as_deref() != Some(main_commit.as_str()) {
+            skipped = true;
+            deployed_ok = false;
+            out.error = Some(format!("Shipped, but not deployed: {} moved on GitHub (another Ship) after this push. That Ship deploys the newer code.", inp.default_branch));
+        } else if !at {
+            deployed_ok = false;
+            out.error = Some("Shipped, but the deploy copy couldn't check out the pushed commit, so nothing was deployed. Use Retry deploy.".into());
+        } else {
+            step(inp, &format!("deploy: {cmd}"), None, None);
+            let (code, o) = (inp.run)(&inp.deploy_dir, cmd);
+            out.deploy_code = Some(code);
+            out.deploy_output = Some(tail(&o, 6000));
+            deployed_ok = code == 0;
+            step(inp, "deploy", None, Some(deployed_ok));
+        }
     }
     let kind = if inp.deploy_command.as_deref().map(|c| !c.trim().is_empty()).unwrap_or(false) { "deploy" } else { "ship" };
     if deployed_ok {
@@ -302,25 +378,33 @@ pub fn ship(inp: &ShipInput) -> ShipOutcome {
             tag = format!("{tag}-{}", &main_commit[..6]);
         }
         if g.run(&["tag", &tag, &main_commit]).is_ok() {
-            if let PushOutcome::Pushed = pusher::push(g, &[Refspec::new(&format!("refs/tags/{tag}"), &format!("refs/tags/{tag}"))], &[], None) {
-                out.tag = Some(tag);
-            }
+            // Kept locally if GitHub refused it; push_pending_tags retries on the next Ship.
+            let _ = pusher::push(g, &[Refspec::new(&format!("refs/tags/{tag}"), &format!("refs/tags/{tag}"))], &[], None);
+            out.tag = Some(tag);
         }
     }
     // Merged branches leave GitHub; fleet-state records the ship.
     let merged: Vec<String> = out.results.iter().filter(|(_, r)| matches!(r, BranchResult::Merged { .. } | BranchResult::Empty)).map(|(b, _)| b.clone()).collect();
-    let deletes: Vec<Refspec> = merged.iter().map(|b| Refspec::delete(&format!("refs/heads/{b}"))).collect();
-    if !deletes.is_empty() {
-        let _ = pusher::push(g, &deletes, &[], None);
+    // Each one only while GitHub still has exactly what was squashed: a prompt that finished
+    // during the Ship pushed commits that aren't in main, and those must not be deleted.
+    for (b, tip) in &out.tips {
+        let dst = format!("refs/heads/{b}");
+        if tip.is_empty() || !matches!(pusher::push(g, &[Refspec::delete(&dst)], &[Lease { dst: dst.clone(), expect: tip.clone() }], None), PushOutcome::Pushed) {
+            out.moved.push(b.clone());
+        }
     }
     let _ = g.run(&["fetch", "--prune", "origin"]);
+    let (tips, moved) = (out.tips.clone(), out.moved.clone());
+    let tip_of = |b: &str| tips.iter().find(|(x, _)| x == b).map(|(_, t)| t.clone()).filter(|t| !t.is_empty());
     let mut changes = vec![];
     for (path, mut f) in state_branch::read_sessions(g, state_branch::REMOTE) {
         if f.archived {
             continue;
         }
         if merged.contains(&f.branch) {
-            f.archived = true;
+            // Moved during the Ship: stays open; its holder carries the new commits over.
+            f.archived = !moved.contains(&f.branch);
+            f.shipped_tip = tip_of(&f.branch);
         } else if g.rev(&format!("refs/remotes/origin/{}", f.branch)).is_some() {
             f.needs_rebase = true;
             out.others.push(f.branch.clone());
@@ -337,9 +421,10 @@ pub fn ship(inp: &ShipInput) -> ShipOutcome {
         branches: merged.clone(),
         machine: inp.machine.clone(),
         at: state_branch::now_stamp(),
-        result: match (kind, deployed_ok) {
-            ("deploy", true) => "deployed".into(),
-            ("deploy", false) => "deploy_failed".into(),
+        result: match (kind, deployed_ok, skipped) {
+            (_, _, true) => "deploy_skipped".into(),
+            ("deploy", true, _) => "deployed".into(),
+            ("deploy", false, _) => "deploy_failed".into(),
             _ => "shipped".into(),
         },
     });
@@ -353,13 +438,15 @@ pub fn ship(inp: &ShipInput) -> ShipOutcome {
 }
 
 /// Run a deploy command again at a tag (rollback = redeploy the previous one; main untouched).
-pub fn redeploy(git: &Git, dir: &Path, tag: &str, setup: Option<&str>, cmd: &str, run: Runner) -> (i32, String) {
+pub fn redeploy(git: &Git, dir: &Path, rev: &str, setup: Option<&str>, cmd: &str, run: Runner) -> (i32, String) {
     let d = dir.to_string_lossy().to_string();
     let _ = git.run(&["worktree", "remove", "--force", &d]);
     let _ = std::fs::remove_dir_all(dir);
-    if let Err(e) = git.run(&["worktree", "add", "-q", "--detach", &d, &format!("refs/tags/{tag}")]) {
+    let _ = git.read(&["worktree", "prune"]);
+    if let Err(e) = git.run(&["worktree", "add", "-q", "--detach", &d, rev]) {
         return (-1, e.to_string());
     }
+    crate::worktree::prepare(&git.root, dir);
     let mut res = (0, String::new());
     if let Some(s) = setup.filter(|s| !s.trim().is_empty()) {
         res = run(dir, s);
@@ -370,6 +457,15 @@ pub fn redeploy(git: &Git, dir: &Path, tag: &str, setup: Option<&str>, cmd: &str
     let _ = git.run(&["worktree", "remove", "--force", &d]);
     let _ = std::fs::remove_dir_all(dir);
     res
+}
+
+/// The deploy to roll back to: the newest successful deploy older than what's live now
+/// (the newest deployed/redeployed entry). A failed deploy on top doesn't count as live.
+pub fn previous_deploy(log: &[DeployEntry]) -> Option<String> {
+    let live = log.iter().rev().find(|d| d.result == "deployed" || d.result == "redeployed")?;
+    let live_tag = live.tag.trim_end_matches(" (redeployed)");
+    let i = log.iter().position(|d| d.result == "deployed" && d.tag == live_tag)?;
+    log[..i].iter().rev().find(|d| d.result == "deployed").map(|d| d.tag.clone())
 }
 
 /// Undo a shipped feature: a revert commit on a new branch from main (it ships next time).
@@ -527,5 +623,69 @@ mod tests {
         let msg = g.read(&["log", "-1", "--format=%s", &head]).unwrap();
         assert!(msg.starts_with("Revert \"Feature X\""), "{msg}");
         assert_eq!(g.rev("refs/heads/main"), Some(feat), "main untouched");
+    }
+
+    #[test]
+    fn commits_pushed_during_a_ship_are_not_deleted() {
+        let fx = Fixture::new("ship-moved");
+        let a = fx.clone("a");
+        let other = fx.clone("other");
+        sh(&a, "echo .fleet/ >> .git/info/exclude");
+        sh(&a, "git switch -q -c fleet/a && echo A > a.txt && git commit -qam a && git push -q origin fleet/a && git switch -q main");
+        let g = fx.git(&a);
+        session(&g, "fleet/a", "fleet/a");
+        sh(&a, "git push -q origin fleet-state");
+        let tip = g.rev("refs/heads/fleet/a").unwrap();
+        // A prompt finishes while the checks run and pushes one more commit.
+        let pushed = Cell::new(false);
+        let run = |d: &Path, c: &str| {
+            if !pushed.get() {
+                pushed.set(true);
+                sh(&other, "git fetch -q && git switch -q fleet/a && echo late > late.txt && git add late.txt && git commit -qm late && git push -q origin fleet/a");
+            }
+            shell(d, c)
+        };
+        let progress = |_: Progress| {};
+        let mut inp = input(&g, &a, &["fleet/a"], &run, &progress);
+        inp.deploy_command = None;
+        let out = ship(&inp);
+        assert!(out.pushed, "{out:?}");
+        assert_eq!(out.moved, vec!["fleet/a".to_string()]);
+        let bare = fx.git(&fx.bare);
+        assert!(bare.read(&["log", "--format=%s", "fleet/a"]).unwrap().starts_with("late\n"), "the late commit is still on GitHub");
+        let f = state_branch::read_session(&bare, "fleet-state", "sessions/a.yml").unwrap();
+        assert!(!f.archived);
+        assert_eq!(f.shipped_tip, Some(tip));
+    }
+
+    #[test]
+    fn previous_deploy_skips_failures_and_follows_rollbacks() {
+        let e = |tag: &str, result: &str| DeployEntry { tag: tag.into(), result: result.into(), ..Default::default() };
+        assert_eq!(previous_deploy(&[e("t1", "deployed"), e("t2", "deployed")]).as_deref(), Some("t1"));
+        // t3 failed: t2 is live, so "previous" is t1, not t2.
+        assert_eq!(previous_deploy(&[e("t1", "deployed"), e("t2", "deployed"), e("t3", "deploy_failed")]).as_deref(), Some("t1"));
+        // Rolled back to t2: the next step back is t1.
+        assert_eq!(previous_deploy(&[e("t1", "deployed"), e("t2", "deployed"), e("t3", "deployed"), e("t2 (redeployed)", "redeployed")]).as_deref(), Some("t1"));
+        assert_eq!(previous_deploy(&[e("t1", "deployed")]), None);
+    }
+
+    #[test]
+    fn files_a_check_rewrites_never_leak_into_the_next_merge_or_the_deploy() {
+        let fx = Fixture::new("ship-dirty");
+        let a = fx.clone("a");
+        sh(&a, "echo .fleet/ >> .git/info/exclude");
+        sh(&a, "git switch -q -c fleet/x && echo x > x.txt && git add x.txt && git commit -qm x && git push -q origin fleet/x && git switch -q main");
+        sh(&a, "git switch -q -c fleet/y && echo y > a.txt && git commit -qam y && git push -q origin fleet/y && git switch -q main");
+        let g = fx.git(&a);
+        let run = |d: &Path, c: &str| shell(d, c);
+        let progress = |_: Progress| {};
+        let mut inp = input(&g, &a, &["fleet/x", "fleet/y"], &run, &progress);
+        // A "formatter" check that rewrites a tracked file the next branch also changes.
+        inp.checks = vec!["echo formatted >> a.txt".into()];
+        inp.deploy_command = Some("git status --porcelain > ../deploy-status".into());
+        let out = ship(&inp);
+        assert!(out.pushed, "{out:?}");
+        assert!(matches!(out.results[1].1, BranchResult::Merged { .. }), "{:?}", out.results[1]);
+        assert_eq!(std::fs::read_to_string(a.join(".fleet/deploy-status")).unwrap(), "", "deployed a clean tree");
     }
 }

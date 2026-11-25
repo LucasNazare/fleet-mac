@@ -34,6 +34,9 @@ pub enum Status {
     /// Another Mac holds this branch.
     TakenOver(String),
     Error(String),
+    /// This branch (named here) was shipped with nothing after it: the worktree is back on
+    /// main without a branch, and the next prompt starts a new one.
+    Shipped(String),
 }
 
 #[derive(Debug, Clone)]
@@ -77,13 +80,53 @@ pub struct Input<'a> {
 /// Never auto-committed: secrets and big files.
 pub fn is_excluded(path: &str, size: u64) -> bool {
     let name = path.rsplit('/').next().unwrap_or(path);
-    name.starts_with(".env") || name.ends_with(".pem") || name.ends_with(".key") || name.starts_with("id_rsa") || size > MAX_FILE
+    let env_template = [".example", ".sample", ".template", ".dist"].iter().any(|s| name.ends_with(s));
+    (name.starts_with(".env") && !env_template) || name.ends_with(".pem") || name.ends_with(".key") || name.starts_with("id_rsa") || size > MAX_FILE
 }
 
-/// A symlink to an absolute path (e.g. a worktree's `node_modules` -> the main folder's): only
-/// valid on this machine, and once committed every checkout replaces the real folder with it.
+/// A symlink that only works on this machine or not at all: absolute target (e.g. a worktree's
+/// `node_modules` -> the main folder's), a target outside the repo or missing (a link to
+/// itself), or one standing where `.gitignore` ignores a folder (`node_modules/` doesn't match
+/// a link). Once committed, every checkout replaces the real folder with it.
 pub fn is_machine_link(root: &std::path::Path, path: &str) -> bool {
-    std::fs::read_link(root.join(path)).map(|t| t.is_absolute()).unwrap_or(false)
+    let full = root.join(path);
+    let Ok(target) = std::fs::read_link(&full) else { return false };
+    if target.is_absolute() {
+        return true;
+    }
+    let (Ok(resolved), Ok(base)) = (std::fs::canonicalize(&full), std::fs::canonicalize(root)) else { return true };
+    if !resolved.starts_with(&base) {
+        return true;
+    }
+    std::process::Command::new("git").arg("-C").arg(root).args(["check-ignore", "-q", "--no-index", "--"]).arg(format!("{path}/")).stderr(std::process::Stdio::null()).status().map(|s| s.success()).unwrap_or(false)
+}
+
+/// Staged nested repositories that aren't real submodules (no .gitmodules entry): they'd be
+/// committed as an empty pointer every other checkout sees as a blank folder.
+pub fn stray_gitlinks(git: &Git, staged: &[String]) -> Vec<String> {
+    let listed = git.read(&["config", "-f", ".gitmodules", "--get-regexp", r"^submodule\..*\.path$"]).unwrap_or_default();
+    let known: Vec<&str> = listed.lines().filter_map(|l| l.split_once(' ').map(|(_, p)| p.trim())).collect();
+    git.read(&["ls-files", "--stage", "-z"])
+        .unwrap_or_default()
+        .split('\0')
+        .filter_map(|e| e.strip_prefix("160000 ").and_then(|r| r.split_once('\t')).map(|(_, p)| p.to_string()))
+        .filter(|p| staged.contains(p) && !known.contains(&p.as_str()))
+        .collect()
+}
+
+/// More new files than this in one prompt is almost always dependencies or build output
+/// that .gitignore doesn't cover yet.
+pub const MAX_NEW_FILES: usize = 3000;
+
+/// "node_modules (2,431), dist (612)": where most of the new files are.
+pub fn biggest_dirs(files: &[String]) -> String {
+    let mut by: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for f in files {
+        *by.entry(f.split('/').next().unwrap_or(f)).or_default() += 1;
+    }
+    let mut v: Vec<(&str, usize)> = by.into_iter().collect();
+    v.sort_by(|a, b| b.1.cmp(&a.1));
+    v.iter().take(3).map(|(d, n)| format!("{d} ({n})")).collect::<Vec<_>>().join(", ")
 }
 
 /// Staged paths that must not be committed: secrets, huge files, machine-specific symlinks.
@@ -166,6 +209,7 @@ pub fn state_file(branch: &str, snap: &Snap, machine: &str) -> SessionFile {
         updated_at: state_branch::now_stamp(),
         archived: false,
         needs_rebase: false,
+        shipped_tip: None,
         claude_session_id: snap.chat.as_ref().map(|c| c.0.clone()),
     }
 }
@@ -184,6 +228,13 @@ pub fn run(inp: &Input) -> Outcome {
     }
     let staged: Vec<String> = git.read(&["diff", "--cached", "--name-only", "-z", "--diff-filter=d"]).unwrap_or_default().split('\0').filter(|s| !s.is_empty()).map(String::from).collect();
     out.excluded = excluded_paths(&git.root, &staged);
+    out.excluded.extend(stray_gitlinks(git, &staged));
+    let added: Vec<String> = git.read(&["diff", "--cached", "--name-only", "-z", "--diff-filter=A"]).unwrap_or_default().split('\0').filter(|s| !s.is_empty()).map(String::from).collect();
+    if added.len() > MAX_NEW_FILES {
+        let _ = git.run(&["reset", "-q"]);
+        out.status = Status::Paused(format!("Not committed: {} new files, mostly in {}. That looks like dependencies or build output — add it to .gitignore (sync resumes on the next prompt), or commit it yourself from the git panel.", added.len(), biggest_dirs(&added)));
+        return out;
+    }
     if !out.excluded.is_empty() {
         let mut a = vec!["reset", "-q", "--"];
         a.extend(out.excluded.iter().map(|s| s.as_str()));
@@ -195,7 +246,7 @@ pub fn run(inp: &Input) -> Outcome {
     let drafted = if has_changes && !inp.wip { (inp.message)(git) } else { None };
     let snap = (inp.snapshot)();
     // 3. The session's branch: named from its title on its first finished prompt.
-    let branch = match git.current_branch() {
+    let mut branch = match git.current_branch() {
         Some(b) => b,
         None => {
             let name = branch_name(inp.prefix, &snap.glyph, &snap.title, &|n| branch_exists(git, n));
@@ -227,6 +278,45 @@ pub fn run(inp: &Input) -> Outcome {
         }
         out.commit = git.rev("HEAD");
     }
+    // 4b. Ship squashed this branch into main. Commits after what it squashed move to a new
+    //     branch on top of main (pushing the old one again would re-ship squashed work);
+    //     with none, the worktree goes back to main.
+    let mut presence = inp.presence.clone();
+    let mut retired: Option<(String, String)> = None;
+    if let Some(tip) = shipped_tip(git, &branch, inp.prefix) {
+        let main = format!("origin/{}", git.default_branch());
+        let head = git.rev("HEAD").unwrap_or_default();
+        if head == tip || git.is_ancestor(&head, &tip) {
+            if git.run(&["switch", "-q", "--detach", &main]).is_err() {
+                out.status = Status::Paused(format!("{branch} was shipped, but this worktree couldn't switch to the new main (files left here are in the way). Commit or discard them."));
+                return out;
+            }
+            let _ = git.run(&["branch", "-q", "-D", &branch]);
+            out.status = Status::Shipped(branch);
+            return out;
+        }
+        if git.is_ancestor(&tip, &head) {
+            let name = branch_name(inp.prefix, &snap.glyph, &snap.title, &|n| branch_exists(git, n));
+            if let Err(e) = git.run(&["branch", "-m", &branch, &name]) {
+                out.status = Status::Error(e.to_string());
+                return out;
+            }
+            out.branch = name.clone();
+            if git.run(&["rebase", "--onto", &main, &tip]).is_err() {
+                let files = conflicted(git);
+                out.status = Status::Conflict(if files.is_empty() { vec!["(see the Output drawer)".into()] } else { files });
+                return out;
+            }
+            retired = Some((branch.clone(), head));
+            branch = name;
+            out.commit = git.rev("HEAD");
+            presence = presence.map(|p| PresenceCtx { expect: None, rewritten_from: None, ..p });
+        }
+    }
+    // 5-6 touch refs shared by every worktree of the repo (fleet-state, remote-tracking refs):
+    // one session at a time per repo, so two Stops at once don't fail each other's writes.
+    let repo_lock = repo_lock(git);
+    let _repo = repo_lock.lock();
     // 5. The session's file on fleet-state.
     let file = state_file(&branch, &snap, inp.machine);
     let path = state_branch::file_for(&branch, inp.prefix);
@@ -235,15 +325,65 @@ pub fn run(inp: &Input) -> Outcome {
     if let Some((_, t)) = &snap.chat {
         changes.push((state_branch::transcript_for(&path), Some(t.clone())));
     }
+    if let Some((old, _)) = &retired {
+        let old_path = state_branch::file_for(old, inp.prefix);
+        if let Some(mut f) = state_branch::read_session(git, state_branch::LOCAL, &old_path).or_else(|| state_branch::read_session(git, state_branch::REMOTE, &old_path)) {
+            f.archived = true;
+            f.updated_at = state_branch::now_stamp();
+            changes.push((old_path, Some(state_branch::to_yaml(&f))));
+        }
+    }
     if let Err(e) = state_branch::write(git, &changes, &format!("state: {} {what}", snap.glyph)) {
-        out.status = Status::Error(e.to_string());
+        out.status = if is_lock_error(&e.to_string()) { Status::Waiting(e.to_string()) } else { Status::Error(e.to_string()) };
         return out;
     }
     // 6. Push branch + state together.
-    let (status, tag) = push_session(git, &branch, inp.presence.as_ref());
+    let (status, tag) = push_session(git, &branch, presence.as_ref());
+    // The old branch's leftovers on GitHub (pushed during the Ship) are in the new branch now.
+    if let (Status::Pushed, Some((old, head))) = (&status, &retired) {
+        let dst = format!("refs/heads/{old}");
+        if let Some(r) = git.rev(&format!("refs/remotes/origin/{old}")).filter(|r| git.is_ancestor(r, head)) {
+            let _ = pusher::push(git, &[Refspec::delete(&dst)], &[Lease { dst: dst.clone(), expect: r }], None);
+        }
+    }
     out.status = status;
     out.presence = tag;
     out
+}
+
+/// "Unable to create '…/index.lock'", "cannot lock ref …": transient, not a real failure.
+pub fn is_lock_error(m: &str) -> bool {
+    let m = m.to_lowercase();
+    m.contains("cannot lock ref") || (m.contains(".lock") && (m.contains("unable to create") || m.contains("file exists")))
+}
+
+fn repo_lock(git: &Git) -> std::sync::Arc<parking_lot::Mutex<()>> {
+    static LOCKS: parking_lot::Mutex<Option<std::collections::HashMap<String, std::sync::Arc<parking_lot::Mutex<()>>>>> = parking_lot::Mutex::new(None);
+    let key = git.read(&["rev-parse", "--path-format=absolute", "--git-common-dir"]).map(|s| s.trim().to_string()).unwrap_or_else(|_| git.root.to_string_lossy().into_owned());
+    LOCKS.lock().get_or_insert_with(Default::default).entry(key).or_default().clone()
+}
+
+/// What Ship squashed of `branch` (from its fleet-state file), if it was shipped.
+pub fn shipped_tip(git: &Git, branch: &str, prefix: &str) -> Option<String> {
+    let path = state_branch::file_for(branch, prefix);
+    let files: Vec<SessionFile> = [state_branch::LOCAL, state_branch::REMOTE].iter().filter_map(|r| state_branch::read_session(git, r, &path)).collect();
+    if let Some(t) = files.iter().find_map(|f| f.shipped_tip.clone()).filter(|t| !t.is_empty()) {
+        return Some(t);
+    }
+    // Shipped before tips were recorded: shipped when main already has every file this branch
+    // changed exactly as the branch has it.
+    if files.iter().any(|f| f.archived) && git.rev(&format!("refs/remotes/origin/{branch}")).is_none() {
+        let main = format!("refs/remotes/origin/{}", git.default_branch());
+        let base = git.read(&["merge-base", "HEAD", &main]).ok()?.trim().to_string();
+        let changed = git.read(&["diff", "--name-only", &base, "HEAD"]).ok()?;
+        let changed: Vec<&str> = changed.lines().filter(|l| !l.is_empty()).collect();
+        let mut a = vec!["diff", "--quiet", "HEAD", main.as_str(), "--"];
+        a.extend(changed.iter().copied());
+        if !changed.is_empty() && git.read(&a).is_ok() {
+            return git.rev("HEAD");
+        }
+    }
+    None
 }
 
 /// Push the session's branch, fleet-state and (optionally) its presence in one atomic push;
@@ -299,6 +439,8 @@ pub fn push_session(git: &Git, branch: &str, presence: Option<&PresenceCtx>) -> 
                     _ => expect = cur.map(|c| c.sha),
                 }
             }
+            // Another git process held a lock (an editor, a second fetch): retry later.
+            PushOutcome::Failed(m) if is_lock_error(&m) => return (Status::Waiting(m), None),
             PushOutcome::Refused(m) | PushOutcome::Failed(m) => return (Status::Error(m), None),
             PushOutcome::Rejected(refs, _) => {
                 if let Err(e) = git.run(&["fetch", "--prune", "origin"]) {
@@ -342,6 +484,8 @@ pub fn push_presence(git: &Git, branch: &str, p: &PresenceCtx) -> (Status, Optio
                     _ => expect = cur.map(|c| c.sha),
                 }
             }
+            // Another git process held a lock (an editor, a second fetch): retry later.
+            PushOutcome::Failed(m) if is_lock_error(&m) => return (Status::Waiting(m), None),
             PushOutcome::Refused(m) | PushOutcome::Failed(m) => return (Status::Error(m), None),
         }
     }
@@ -384,10 +528,56 @@ mod tests {
     }
 
     #[test]
+    fn env_templates_are_committed() {
+        for p in [".env.example", "api/.env.sample", ".env.template"] {
+            assert!(!is_excluded(p, 10), "{p}");
+        }
+    }
+
+    #[test]
+    fn escaping_broken_and_ignored_links_are_excluded() {
+        let d = std::env::temp_dir().join(format!("fleet-link2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("react")).unwrap();
+        std::fs::create_dir_all(d.join("lib")).unwrap();
+        let sh = |c: &str| assert!(std::process::Command::new("/bin/sh").arg("-c").arg(c).current_dir(&d).status().unwrap().success());
+        sh("git init -q && printf 'node_modules/\\n' > .gitignore");
+        std::os::unix::fs::symlink("node_modules", d.join("react/node_modules")).unwrap();
+        std::os::unix::fs::symlink("../../../elsewhere", d.join("react/out")).unwrap();
+        std::os::unix::fs::symlink("../lib", d.join("react/lib")).unwrap();
+        let staged: Vec<String> = ["react/node_modules", "react/out", "react/lib"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(excluded_paths(&d, &staged), vec!["react/node_modules".to_string(), "react/out".to_string()]);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn nested_repos_and_dependency_dumps_are_not_committed() {
+        let fx = Fixture::new("gitlink");
+        let a = fx.clone("a");
+        let wt = worktree(&a);
+        let g = fx.git(&wt);
+        sh(&wt, "mkdir vendor && cd vendor && git init -q x && cd x && echo 1 > f && git add f && git -c user.name=t -c user.email=t@t commit -qm v");
+        std::fs::write(wt.join("app.ts"), "x").unwrap();
+        let s = || snap("Vendor", 1);
+        let m = |_: &Git| None;
+        let out = run(&input(&g, &s, &m));
+        assert_eq!(out.status, Status::Pushed, "{out:?}");
+        assert!(out.excluded.contains(&"vendor/x".to_string()), "{:?}", out.excluded);
+        let tree = fx.git(&fx.bare).read(&["ls-tree", "-r", "--name-only", &out.branch]).unwrap();
+        assert!(tree.contains("app.ts") && !tree.contains("vendor"));
+        // A dependency folder nobody ignored: nothing is committed, the user is told why.
+        sh(&wt, "mkdir -p deps && for i in $(seq 1 3001); do echo $i > deps/f$i; done");
+        let out = run(&input(&g, &s, &m));
+        assert!(matches!(&out.status, Status::Paused(m) if m.contains("deps (3001)")), "{out:?}");
+        assert!(g.read(&["diff", "--cached", "--name-only"]).unwrap().is_empty());
+    }
+
+    #[test]
     fn absolute_symlinks_are_excluded() {
         let d = std::env::temp_dir().join(format!("fleet-link-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(d.join("react")).unwrap();
+        std::fs::create_dir_all(d.join("shared")).unwrap();
         std::os::unix::fs::symlink(d.join("react/node_modules"), d.join("react/node_modules")).unwrap();
         std::os::unix::fs::symlink("../shared", d.join("react/shared")).unwrap();
         std::fs::write(d.join("a.ts"), "x").unwrap();
@@ -549,5 +739,68 @@ mod tests {
         assert_eq!(out.status, Status::Pushed);
         let msg = fx.git(&fx.bare).read(&["log", "-1", "--format=%s", &out.branch]).unwrap();
         assert_eq!(msg.trim(), "wip: Halfway");
+    }
+
+    /// Ship (squash) `branch` from clone `a` the way ship.rs does: main gets one commit, the
+    /// branch leaves GitHub, and its session file records what was squashed.
+    fn ship_from(fx: &Fixture, a: &Path, branch: &str) -> String {
+        sh(a, &format!("git fetch -q origin && git switch -q main && git merge -q --ff-only origin/main && git merge -q --squash origin/{branch} && git commit -qm shipped && git push -q origin main"));
+        let tip = fx.git(a).rev(&format!("refs/remotes/origin/{branch}")).unwrap();
+        sh(a, &format!("git push -q origin :{branch} && git fetch -q origin fleet-state:fleet-state"));
+        let g = fx.git(a);
+        let path = state_branch::file_for(branch, "fleet/");
+        let mut f = state_branch::read_session(&g, state_branch::LOCAL, &path).unwrap();
+        f.archived = true;
+        f.shipped_tip = Some(tip.clone());
+        state_branch::write(&g, &[(path, Some(state_branch::to_yaml(&f)))], "state: ship").unwrap();
+        sh(a, "git push -q origin fleet-state");
+        tip
+    }
+
+    #[test]
+    fn work_after_a_ship_moves_to_a_new_branch_on_main() {
+        let fx = Fixture::new("carry");
+        let a = fx.clone("a");
+        let wt = worktree(&a);
+        let g = fx.git(&wt);
+        let m = |_: &Git| None;
+        std::fs::write(wt.join("fees.ts"), "v1\n").unwrap();
+        let s = || snap("Pix fees", 1);
+        let first = run(&input(&g, &s, &m));
+        assert_eq!(first.status, Status::Pushed);
+        ship_from(&fx, &a, &first.branch);
+        // The next prompt finishes after the Ship: only its commit goes out, on a new branch.
+        sh(&wt, "git fetch -q --prune origin '+refs/heads/*:refs/remotes/origin/*'");
+        std::fs::write(wt.join("more.ts"), "v2\n").unwrap();
+        let s2 = || snap("Pix fees", 2);
+        let out = run(&input(&g, &s2, &m));
+        assert_eq!(out.status, Status::Pushed, "{out:?}");
+        assert_ne!(out.branch, first.branch);
+        let bare = fx.git(&fx.bare);
+        assert!(bare.rev(&format!("refs/heads/{}", first.branch)).is_none(), "the shipped branch stays gone");
+        assert_eq!(bare.read(&["rev-list", "--count", &format!("main..{}", out.branch)]).unwrap().trim(), "1");
+        assert!(bare.is_ancestor("main", &out.branch));
+        let old = state_branch::read_session(&bare, "fleet-state", &state_branch::file_for(&first.branch, "fleet/")).unwrap();
+        assert!(old.archived);
+    }
+
+    #[test]
+    fn nothing_after_a_ship_detaches_onto_main() {
+        let fx = Fixture::new("shipped");
+        let a = fx.clone("a");
+        let wt = worktree(&a);
+        let g = fx.git(&wt);
+        let m = |_: &Git| None;
+        std::fs::write(wt.join("fees.ts"), "v1\n").unwrap();
+        let s = || snap("Pix fees", 1);
+        let first = run(&input(&g, &s, &m));
+        ship_from(&fx, &a, &first.branch);
+        sh(&wt, "git fetch -q --prune origin '+refs/heads/*:refs/remotes/origin/*'");
+        let out = run(&input(&g, &s, &m));
+        assert_eq!(out.status, Status::Shipped(first.branch.clone()), "{out:?}");
+        assert!(g.current_branch().is_none());
+        assert_eq!(g.rev("HEAD"), g.rev("refs/remotes/origin/main"));
+        assert!(g.rev(&format!("refs/heads/{}", first.branch)).is_none());
+        assert!(fx.git(&fx.bare).rev(&format!("refs/heads/{}", first.branch)).is_none(), "not pushed again");
     }
 }

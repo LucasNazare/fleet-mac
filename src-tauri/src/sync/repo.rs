@@ -5,6 +5,8 @@
 use super::*;
 use std::process::Command;
 
+const DEFAULT_GITIGNORE: &str = "node_modules/\n.pnpm-store/\ndist/\nbuild/\nout/\n.next/\n.nuxt/\n.svelte-kit/\n.turbo/\n.cache/\ncoverage/\ntarget/\n.venv/\nvenv/\n__pycache__/\n*.pyc\n.DS_Store\n.env\n.env.*\n!.env.example\n*.log\n";
+
 /// GitHub repo names: letters, digits, `-`, `_`, `.`.
 pub fn valid_name(name: &str) -> bool {
     !name.is_empty() && name.len() <= 100 && name != "." && name != ".." && name.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
@@ -19,7 +21,18 @@ pub fn first_commit(git: &Git) -> Result<Vec<String>, String> {
         return Ok(vec![]);
     }
     git.run(&["symbolic-ref", "HEAD", "refs/heads/main"]).map_err(|e| e.to_string())?;
+    // No .gitignore yet: start with the usual dependency/build/OS folders so the first commit
+    // (and every autocommit after it) doesn't carry them.
+    let gi = git.root.join(".gitignore");
+    if !gi.exists() {
+        std::fs::write(&gi, DEFAULT_GITIGNORE).map_err(|e| e.to_string())?;
+    }
     git.run(&["add", "-A"]).map_err(|e| e.to_string())?;
+    let added: Vec<String> = git.read(&["diff", "--cached", "--name-only", "-z"]).unwrap_or_default().split('\0').filter(|s| !s.is_empty()).map(String::from).collect();
+    if added.len() > autocommit::MAX_NEW_FILES {
+        let _ = git.run(&["reset", "-q"]);
+        return Err(format!("The folder has {} files, mostly in {}. Add the generated ones to .gitignore first, then create the repo.", added.len(), autocommit::biggest_dirs(&added)));
+    }
     let staged: Vec<String> = git.read(&["diff", "--cached", "--name-only", "-z"]).unwrap_or_default().split('\0').filter(|s| !s.is_empty()).map(String::from).collect();
     let skipped: Vec<String> = autocommit::excluded_paths(&git.root, &staged);
     if !skipped.is_empty() {
@@ -108,9 +121,9 @@ mod tests {
         let app = dir.join("app");
         let git = Git::new(&app, None, None);
         let skipped = first_commit(&git).unwrap();
-        assert_eq!(skipped, vec![".env"]);
+        assert!(skipped.is_empty(), "the default .gitignore keeps .env out: {skipped:?}");
         assert_eq!(git.current_branch().as_deref(), Some("main"));
-        assert_eq!(git.read(&["ls-files"]).unwrap().trim(), "a.txt");
+        assert_eq!(git.read(&["ls-files"]).unwrap().trim(), ".gitignore\na.txt");
         assert!(app.join(".env").exists(), "kept on disk");
         assert_eq!(first_commit(&git).unwrap(), Vec::<String>::new(), "idempotent once there's a commit");
         sh(&app, "git remote add origin ../github.git");

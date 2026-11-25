@@ -76,6 +76,9 @@ pub struct GlobalStatus {
     pub waiting: usize,
     pub paused_all: bool,
     pub any_synced: bool,
+    /// Project name → why GitHub can't be reached for a reason other than the network
+    /// (signed out, no access, repo gone). Cleared by that project's next good fetch.
+    pub problems: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -130,6 +133,40 @@ pub fn git_for(app: &AppHandle, root: impl Into<PathBuf>) -> Git {
 
 fn override_path(project_id: &str) -> PathBuf {
     persist::app_dir().join("fleet-config").join(format!("{project_id}.yml"))
+}
+
+/// The fleet/config-<date> branch holding this Mac's unshipped fleet.yml edit.
+fn override_branch_path(project_id: &str) -> PathBuf {
+    persist::app_dir().join("fleet-config").join(format!("{project_id}.branch"))
+}
+
+/// After each fetch: the unshipped fleet.yml edit's branch is pushed if it never got out
+/// (saved offline), and the edit is dropped once its branch shipped or is gone everywhere —
+/// so a local override can't shadow main's config forever.
+fn config_upkeep(app: &AppHandle, p: &Project, git: &Git) {
+    let Ok(branch) = std::fs::read_to_string(override_branch_path(&p.id)) else { return };
+    let branch = branch.trim().to_string();
+    let local = git.rev(&format!("refs/heads/{branch}"));
+    let remote = git.rev(&format!("refs/remotes/origin/{branch}"));
+    let main_ref = format!("refs/remotes/origin/{}", git.default_branch());
+    let on_main = local.as_ref().is_some_and(|l| git.show_file(l, fleetyml::FILE).is_some() && git.show_file(l, fleetyml::FILE) == git.show_file(&main_ref, fleetyml::FILE));
+    let shipped = on_main || (local.is_none() && state_branch::read_deploys(git, state_branch::REMOTE).iter().any(|d| d.branches.contains(&branch)));
+    let drop = |why: &str| {
+        let _ = std::fs::remove_file(override_path(&p.id));
+        let _ = std::fs::remove_file(override_branch_path(&p.id));
+        if local.is_some() && remote.is_none() {
+            let _ = git.run(&["branch", "-q", "-D", &branch]);
+        }
+        refresh_configs(app, Some(&p.id));
+        let _ = app.emit("toast", format!("{}: {why}", p.name));
+    };
+    if shipped && remote.is_none() {
+        drop("the fleet.yml edit is on main now.");
+    } else if local.is_none() && remote.is_none() {
+        drop("the unshipped fleet.yml edit's branch is gone, so this Mac uses main's fleet.yml again.");
+    } else if local.is_some() && remote.is_none() {
+        let _ = pusher::push(git, &[pusher::Refspec::branch(&branch)], &[], None);
+    }
 }
 
 fn cache_path(project_id: &str) -> PathBuf {
@@ -336,6 +373,21 @@ pub fn session_worktree(app: &AppHandle, project: &Project, title: &str) -> Resu
 pub fn run_setup(app: &AppHandle, dir: &str, setup: &str) {
     let (app, dir, setup) = (app.clone(), dir.to_string(), setup.to_string());
     std::thread::spawn(move || {
+        run_setup_now(&app, &dir, &setup);
+    });
+}
+
+/// `sync.setup` in `dir`, on this thread; returns its exit code.
+pub fn run_setup_now(app: &AppHandle, dir: &str, setup: &str) -> i32 {
+    let (dir, setup) = (dir.to_string(), setup.to_string());
+    {
+        // The worktree's copied .env and cloned node_modules first (prepare is serialized
+        // and skips what exists): setup then installs on top, never racing the clone.
+        if let Ok(common) = Git::new(&dir, None, None).read(&["rev-parse", "--path-format=absolute", "--git-common-dir"]) {
+            if let Some(root) = Path::new(common.trim()).parent() {
+                crate::worktree::prepare(root, Path::new(&dir));
+            }
+        }
         let t0 = std::time::Instant::now();
         let shell = crate::shell_env::login_env().get("SHELL").cloned().unwrap_or_else(|| "/bin/zsh".into());
         let out = std::process::Command::new(shell).arg("-c").arg(&setup).current_dir(&dir).env_clear().envs(crate::shell_env::login_env()).env("CI", "1").output();
@@ -351,11 +403,12 @@ pub fn run_setup(app: &AppHandle, dir: &str, setup: &str) {
             }
             output = format!("… {}", &output[cut..]);
         }
-        logger(&app)(LogLine { root: dir.clone(), cmd: format!("setup: {setup}"), output: output.trim_end().into(), code, ms: t0.elapsed().as_millis() as u64 });
+        logger(app)(LogLine { root: dir.clone(), cmd: format!("setup: {setup}"), output: output.trim_end().into(), code, ms: t0.elapsed().as_millis() as u64 });
         if code != 0 {
-            let _ = app.emit("toast", format!("Setup ({setup}) failed in the new worktree — see the Output drawer."));
+            let _ = app.emit("toast", format!("Setup ({setup}) failed in {dir} — see the Output drawer."));
         }
-    });
+        code
+    }
 }
 
 fn session_lock(app: &AppHandle, id: &str) -> Arc<Mutex<()>> {
@@ -479,6 +532,18 @@ fn apply_outcome(app: &AppHandle, id: &str, project_id: &str, wt: &str, out: &au
             enqueue(app, Queued { project_id: project_id.into(), session_id: id.into(), worktree: wt.into(), branch: out.branch.clone(), attempts: 0, next_at: now + 5_000 });
             app.state::<SyncState>().status.lock().offline = true;
         }
+        Status::Shipped(old) => {
+            app.state::<SyncState>().queue.lock().retain(|q| q.session_id != id);
+            if let Some(mine) = app.state::<SyncState>().presence.lock().remove(id) {
+                autocommit::release_presence(&git_for(app, wt), old, &mine);
+            }
+            crate::update_session(app, id, |s| {
+                s.branch = String::new();
+                s.files_touched.clear();
+                s.line_marks.clear();
+                true
+            });
+        }
         Status::Conflict(files) => {
             app.state::<SyncState>().queue.lock().retain(|q| q.session_id != id);
             let q = format!("Conflict with GitHub's {} in {} — resolve it (git rebase --continue), then sync resumes.", out.branch, files.join(", "));
@@ -524,6 +589,11 @@ fn apply_outcome(app: &AppHandle, id: &str, project_id: &str, wt: &str, out: &au
             Status::Error(m) => {
                 i.badge = "error".into();
                 i.detail = Some(m.clone());
+            }
+            Status::Shipped(_) => {
+                i.badge = "new".into();
+                i.waiting = 0;
+                i.detail = Some("Shipped ✓ — the next prompt starts a new branch".into());
             }
         }
     });
@@ -601,7 +671,9 @@ fn flush(app: &AppHandle, force: bool) {
             continue;
         }
         let lock = session_lock(app, &q.session_id);
-        let _g = lock.lock();
+        // That session is syncing right now (it may be waiting on its commit message): its
+        // own push covers this entry; don't hold up the fetch loop for it.
+        let Some(_g) = lock.try_lock() else { continue };
         if !Path::new(&q.worktree).is_dir() {
             app.state::<SyncState>().queue.lock().retain(|x| x.session_id != q.session_id);
             continue;
@@ -640,8 +712,14 @@ fn fetch_project(app: &AppHandle, p: &Project) {
     let ok = match git.run(&["fetch", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*", presence::FETCH_SPEC]) {
         Ok(_) => true,
         Err(e) => {
-            if pusher::is_offline(&e.stderr) {
-                app.state::<SyncState>().status.lock().offline = true;
+            let state = app.state::<SyncState>();
+            let mut st = state.status.lock();
+            if pusher::is_auth(&e.stderr) {
+                st.problems.insert(p.name.clone(), "GitHub refused fleet's sign-in or this repo's access. Sign in again (GitHub sync dialog → Sign in, or `gh auth login`).".into());
+            } else if pusher::is_offline(&e.stderr) {
+                st.offline = true;
+            } else {
+                st.problems.insert(p.name.clone(), format!("Fetching from GitHub fails: {}", e.stderr.trim().lines().last().unwrap_or("git fetch failed")));
             }
             false
         }
@@ -653,11 +731,13 @@ fn fetch_project(app: &AppHandle, p: &Project) {
             let mut s = st.status.lock();
             let was_offline = s.offline;
             s.offline = false;
+            s.problems.remove(&p.name);
             s.last_sync_at = Some(now_ms());
             if was_offline {
                 st.flush_now.store(true, Ordering::Relaxed);
             }
         }
+        config_upkeep(app, p, &git);
         refresh_configs(app, Some(&p.id));
         load::load_sequence(app, p);
     }
@@ -683,12 +763,36 @@ fn repo_private(app: &AppHandle, p: &Project) -> Option<bool> {
 
 /// A session closed: release its presence in the background.
 /// Called with the store locked: everything needed is passed in.
-pub fn on_close(app: &AppHandle, id: &str, branch: &str, worktree: Option<&str>) {
-    let Some(mine) = app.state::<SyncState>().presence.lock().remove(id) else { return };
-    let (Some(wt), false) = (worktree.map(String::from), branch.is_empty()) else { return };
-    let (app, branch) = (app.clone(), branch.to_string());
+pub fn on_close(app: &AppHandle, s: &Session) {
+    let (app, s) = (app.clone(), s.clone());
     std::thread::spawn(move || {
-        autocommit::release_presence(&git_for(&app, &wt), &branch, &mine);
+        // Edits from a turn that never reached Stop (interrupted, then closed): committed as
+        // wip and pushed, so closing a session can't strand work in its worktree.
+        if let Some(wt) = s.worktree_path.clone().filter(|w| Path::new(w).is_dir()) {
+            std::thread::sleep(Duration::from_millis(1500));
+            let dirty = git_for(&app, &wt).read(&["status", "--porcelain"]).map(|o| !o.trim().is_empty()).unwrap_or(false);
+            if dirty && s.remote.is_none() {
+                if find(&app, &s.id).is_some() {
+                    sync_session(&app, &s.id, true);
+                } else if let Some(conf) = project(&app, &s.project_id).ok().filter(|p| !p.sync_paused && !paused_all()).and_then(|p| enabled_cfg(&app, &p.id)) {
+                    let lock = session_lock(&app, &s.id);
+                    let _g = lock.lock();
+                    let git = git_for(&app, &wt);
+                    let snap = snap_of(&s);
+                    let snapshot = || snap.clone();
+                    let message = |_: &Git| None;
+                    let out = autocommit::run(&autocommit::Input { git: &git, prefix: &conf.sync.branch_prefix, machine: &machine_name(), wip: true, snapshot: &snapshot, message: &message, presence: None });
+                    if !matches!(out.status, autocommit::Status::Pushed | autocommit::Status::Shipped(_)) {
+                        let _ = app.emit("toast", format!("{} · {}: its last edits were committed in {wt} but not pushed ({:?}).", s.glyph, s.title, out.status));
+                    }
+                }
+            }
+        }
+        let branch = find(&app, &s.id).map(|(x, _)| x.branch).unwrap_or(s.branch.clone());
+        let Some(mine) = app.state::<SyncState>().presence.lock().remove(&s.id) else { return };
+        if let (Some(wt), false) = (s.worktree_path.clone(), branch.is_empty()) {
+            autocommit::release_presence(&git_for(&app, &wt), &branch, &mine);
+        }
     });
 }
 
@@ -709,9 +813,19 @@ pub fn start(app: AppHandle) {
     for id in stale {
         let queued = app.state::<SyncState>().queue.lock().iter().filter(|q| q.session_id == id).count() as u32;
         set_sync(&app, &id, |i| {
-            i.badge = if queued > 0 { "waiting".into() } else if i.last_push_at.is_some() { "pushed".into() } else { "new".into() };
+            i.badge = if queued > 0 { "waiting".into() } else { "new".into() };
             i.waiting = queued;
         });
+        // That sync never finished: run it again rather than claim it did.
+        if queued == 0 {
+            let app = app.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_secs(10));
+                if find(&app, &id).is_some_and(|(s, _)| s.state != SessionState::Working) {
+                    sync_session(&app, &id, false);
+                }
+            });
+        }
     }
     app.state::<SyncState>().fetch_soon.store(true, Ordering::Relaxed);
     sleep::observe(app.clone());
@@ -848,6 +962,7 @@ pub async fn sync_save_config(app: AppHandle, project_id: String, text: String) 
         std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
         std::fs::write(&path, &text).map_err(|e| e.to_string())?;
         let branch = commit_config_branch(&app, &root, &text, &c)?;
+        let _ = std::fs::write(override_branch_path(&p.id), &branch);
         ensure_state_branch(&app, &root);
         refresh_configs(&app, Some(&p.id));
         let _ = app.emit("toast", format!("fleet.yml saved to {branch} — it reaches main with the next Ship."));
@@ -882,11 +997,15 @@ pub fn sync_set_paused(app: AppHandle, project_id: Option<String>, paused: bool)
             if paused_now {
                 i.badge = "paused".into();
                 i.detail = Some("Sync is paused".into());
-            } else if i.badge == "paused" {
-                i.badge = if i.waiting > 0 { "waiting".into() } else { "pushed".into() };
-                i.detail = None;
             }
         });
+        // Prompts that finished while paused were never committed: sync them now.
+        let was_paused = find(&app, &sid).and_then(|(s, _)| s.sync).is_some_and(|i| i.badge == "paused" && i.detail.as_deref() == Some("Sync is paused"));
+        let working = find(&app, &sid).is_some_and(|(s, _)| s.state == SessionState::Working);
+        if !paused_now && was_paused && !working {
+            let app = app.clone();
+            std::thread::spawn(move || sync_session(&app, &sid, false));
+        }
     }
     Ok(())
 }
@@ -966,46 +1085,70 @@ pub async fn sync_adopt_local(app: AppHandle, project_id: String, cols: u16, row
         }
         let _ = git.run(&["fetch", "--prune", "origin"]);
         let work = adopt::scan(&git, &c.default_branch);
+        if let Some(n) = adopt::stranded_main(&git, &work, &c.default_branch) {
+            return Err(format!("Local {} has {n} commit(s) that aren't on GitHub, and the project folder is on another branch. Switch the folder to {} first so fleet can keep them.", c.default_branch, c.default_branch));
+        }
         let base = work.head.clone().unwrap_or_else(|| "HEAD".into());
+        // Pre-sync sessions start from GitHub's main plus their own files; only "Local changes"
+        // keeps the folder's HEAD (its commits that GitHub doesn't have go there, once).
+        let origin_main = format!("refs/remotes/origin/{}", c.default_branch);
+        let session_base = if git.rev(&origin_main).is_some() { origin_main.clone() } else { base.clone() };
         let rootp = format!("{}/", p.root_path.trim_end_matches('/'));
         let touched: Vec<(String, Vec<String>)> = presync.iter().map(|s| (s.id.clone(), s.files_touched.iter().filter_map(|f| f.strip_prefix(&rootp).map(String::from)).collect())).collect();
         let (owned, rest) = adopt::assign(&work.files, &touched);
         let stash_sha = if work.files.is_empty() { None } else { adopt::stash(&git).map_err(|e| e.to_string())? };
         let mut to_sync = vec![];
         let mut moved = 0;
-        for s in &presync {
-            let wt = crate::worktree::create_detached(&root, &s.title, &base)?;
-            if let (Some(st), Some(files)) = (&stash_sha, owned.get(&s.id)) {
-                adopt::materialize(&git.at(&wt), st, files).map_err(|e| e.to_string())?;
-                to_sync.push(s.id.clone());
-            }
-            move_session_to(&app, &s.id, &wt)?;
-            moved += 1;
-        }
         let mut new_session = None;
-        if !rest.is_empty() || work.ahead > 0 {
-            let wt = crate::worktree::create_detached(&root, "local-changes", &base)?;
-            if let Some(st) = &stash_sha {
-                adopt::materialize(&git.at(&wt), st, &rest).map_err(|e| e.to_string())?;
+        let moved_out = (|| -> Result<(), String> {
+            for s in &presync {
+                let wt = crate::worktree::create_detached(&root, &s.title, &session_base)?;
+                if let (Some(st), Some(files)) = (&stash_sha, owned.get(&s.id)) {
+                    adopt::materialize(&git.at(&wt), st, files).map_err(|e| e.to_string())?;
+                    to_sync.push(s.id.clone());
+                }
+                move_session_to(&app, &s.id, &wt)?;
+                moved += 1;
             }
-            let s = crate::create_session(
-                &app,
-                &p,
-                crate::SessionSpec {
-                    title: "Local changes".into(),
-                    worktree_path: Some(wt),
-                    sync: Some(SyncInfo { badge: "syncing".into(), ..Default::default() }),
-                    recap: vec![format!("{} file(s) and {} commit(s) that were in the project folder before sync", rest.len(), work.ahead)],
-                    ..Default::default()
-                },
-                cols,
-                rows,
-            )?;
-            new_session = Some(s.id.clone());
-            to_sync.push(s.id);
+            if !rest.is_empty() || work.ahead > 0 {
+                let wt = crate::worktree::create_detached(&root, "local-changes", &base)?;
+                if let Some(st) = &stash_sha {
+                    adopt::materialize(&git.at(&wt), st, &rest).map_err(|e| e.to_string())?;
+                }
+                let s = crate::create_session(
+                    &app,
+                    &p,
+                    crate::SessionSpec {
+                        title: "Local changes".into(),
+                        worktree_path: Some(wt),
+                        sync: Some(SyncInfo { badge: "syncing".into(), ..Default::default() }),
+                        recap: vec![format!("{} file(s) and {} commit(s) that were in the project folder before sync", rest.len(), work.ahead)],
+                        ..Default::default()
+                    },
+                    cols,
+                    rows,
+                )?;
+                new_session = Some(s.id.clone());
+                to_sync.push(s.id);
+            }
+            Ok(())
+        })();
+        if let Err(e) = moved_out {
+            // Put the folder's work back where it was; nothing stays only in the stash.
+            let restored = match &stash_sha {
+                Some(st) => git.run(&["stash", "apply", "--index", st]).or_else(|_| git.run(&["stash", "apply", st])).is_ok(),
+                None => true,
+            };
+            if restored {
+                if let Some(st) = &stash_sha {
+                    adopt::drop_stash(&git, st);
+                }
+            }
+            let where_ = if restored { "Its changes are back in the project folder".to_string() } else { format!("Its changes are saved in git stash {}", stash_sha.clone().unwrap_or_default()) };
+            return Err(format!("Moving the project folder's work stopped: {e}. {where_}{}.", if moved > 0 { format!("; {moved} session(s) were already moved (their files are in both places)") } else { String::new() }));
         }
-        if stash_sha.is_some() {
-            let _ = git.run(&["stash", "drop", "-q"]);
+        if let Some(st) = &stash_sha {
+            adopt::drop_stash(&git, st);
         }
         adopt::reset_main(&git, &work, &c.default_branch).map_err(|e| e.to_string())?;
         if let Some(conf) = &c.config {

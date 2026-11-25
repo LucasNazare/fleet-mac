@@ -92,19 +92,23 @@ pub fn load_sequence(app: &AppHandle, p: &Project) {
     let mut others = vec![];
     let mut archive = vec![];
     for (path, f) in files {
+        let mine = local.iter().find(|s| s.branch == f.branch);
+        let gone = !remote_branches.contains(&f.branch);
+        // Shipped (here or on another Mac), or deleted on GitHub, while a session here still
+        // holds the branch.
+        if f.archived || f.shipped_tip.is_some() || gone {
+            if let Some(s) = mine {
+                detach_shipped(app, s, &c.default_branch);
+            }
+        }
         if f.archived {
             continue;
         }
-        let mine = local.iter().find(|s| s.branch == f.branch);
-        if !remote_branches.contains(&f.branch) {
-            // Merged (shipped) or deleted on GitHub.
+        if gone {
             let mut g = f.clone();
             g.archived = true;
             g.updated_at = state_branch::now_stamp();
             archive.push((path.clone(), Some(state_branch::to_yaml(&g))));
-            if let Some(s) = mine {
-                detach_shipped(app, s, &c.default_branch);
-            }
             continue;
         }
         match mine {
@@ -197,58 +201,92 @@ pub fn emit_others(app: &AppHandle) {
 /// from it restart if dependencies changed.
 fn fast_forward_main(app: &AppHandle, p: &Project, git: &Git, default_branch: &str) {
     let work = adopt::scan(git, default_branch);
-    if !work.files.is_empty() || work.branch.as_deref() != Some(default_branch) {
-        return;
-    }
     let origin = format!("refs/remotes/origin/{default_branch}");
     let (Some(head), Some(o)) = (work.head.clone(), git.rev(&origin)) else { return };
-    if head == o || !git.is_ancestor(&head, &o) {
+    if head == o {
         return;
     }
-    let changed = git.read(&["diff", "--name-only", &head, &o]).unwrap_or_default();
-    if git.run(&["merge", "-q", "--ff-only", &origin]).is_err() {
+    if !work.files.is_empty() || work.branch.as_deref() != Some(default_branch) || !git.is_ancestor(&head, &o) {
+        // Stuck behind GitHub: anything run from this folder (a deploy script, dev processes)
+        // uses old code. Say so once per GitHub commit instead of skipping silently.
+        static WARNED: std::sync::Mutex<Option<std::collections::HashMap<String, String>>> = std::sync::Mutex::new(None);
+        let mut w = WARNED.lock().unwrap_or_else(|e| e.into_inner());
+        if w.get_or_insert_with(std::collections::HashMap::new).insert(p.id.clone(), o.clone()).as_deref() != Some(o.as_str()) {
+            let behind = git.read(&["rev-list", "--count", &format!("HEAD..{origin}")]).map(|s| s.trim().to_string()).unwrap_or_default();
+            let why = if work.branch.as_deref() != Some(default_branch) {
+                format!("it isn't on {default_branch}")
+            } else if !work.files.is_empty() {
+                let shown: Vec<&str> = work.files.iter().take(3).map(|f| f.as_str()).collect();
+                format!("it has local changes ({}{})", shown.join(", "), if work.files.len() > 3 { ", …" } else { "" })
+            } else {
+                "it has commits GitHub doesn't".into()
+            };
+            let _ = app.emit("toast", format!("{}'s main folder is {behind} commit(s) behind GitHub and wasn't updated: {why}. Scripts run from it (deploys too) use the old code.", p.name));
+        }
         return;
     }
-    let deps = ["package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb", "bun.lock", "Cargo.lock", "go.sum", "Gemfile.lock", "poetry.lock", "uv.lock", "requirements.txt", "pyproject.toml", "composer.lock"];
-    let deps_changed = changed.lines().any(|l| deps.iter().any(|d| l == *d || l.ends_with(&format!("/{d}"))));
-    if deps_changed {
-        let runs: Vec<(String, String)> = app.state::<Fleet>().runs.lock().values().filter(|r| r.project_id == p.id && r.status == crate::processes::RunStatus::Running && r.session_id.is_none()).map(|r| (r.project_id.clone(), r.def_id.clone())).collect();
-        for (pid, did) in runs {
-            let _ = crate::proc_runtime::restart(app, &pid, &did, 120, 32, None);
-        }
-        if !app.state::<Fleet>().runs.lock().is_empty() {
-            let _ = app.emit("toast", format!("{} updated from GitHub; dependencies changed, dev processes restarted.", p.name));
-        }
+    if let Err(e) = git.run(&["merge", "-q", "--ff-only", &origin]) {
+        let _ = app.emit("toast", format!("{}'s main folder couldn't take GitHub's newer main: {}", p.name, e.to_string().lines().last().unwrap_or("git merge failed")));
+        return;
     }
+    after_update(app, p, &p.root_path, None, &head, &o);
 }
 
-/// The session's branch was shipped (merged + deleted): its worktree goes back to a clean
-/// detached main, and its next prompt starts a new branch.
-pub fn detach_shipped(app: &AppHandle, s: &Session, default_branch: &str) {
-    let Some(wt) = s.worktree_path.clone().filter(|w| Path::new(w).is_dir()) else { return };
-    if s.state == SessionState::Working {
+const DEP_FILES: [&str; 14] = ["package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb", "bun.lock", "Cargo.lock", "go.sum", "Gemfile.lock", "poetry.lock", "uv.lock", "requirements.txt", "pyproject.toml", "composer.lock"];
+
+/// A folder's code moved from `old` to `new` (fast-forward, rebase after a Ship). When
+/// dependency files changed: run `sync.setup` there, then restart the dev processes that run
+/// from it (the main folder's, or that session's), so nothing keeps running on stale deps.
+pub fn after_update(app: &AppHandle, p: &Project, dir: &str, session: Option<&str>, old: &str, new: &str) {
+    let git = git_for(app, dir);
+    let changed = git.read(&["diff", "--name-only", old, new]).unwrap_or_default();
+    if !changed.lines().any(|l| DEP_FILES.iter().any(|d| l == *d || l.ends_with(&format!("/{d}")))) {
         return;
     }
-    let git = git_for(app, &wt);
-    let dirty = git.read(&["status", "--porcelain", "--untracked-files=no"]).map(|o| !o.trim().is_empty()).unwrap_or(true);
-    let branch = s.branch.clone();
-    if dirty || git.run(&["switch", "-q", "--detach", &format!("origin/{default_branch}")]).is_err() {
-        set_sync(app, &s.id, |i| {
-            i.badge = "paused".into();
-            i.detail = Some(format!("{branch} was shipped, but this worktree has uncommitted changes. Finish the prompt; fleet moves it to a new branch after."));
-        });
+    let (app, p, dir, session) = (app.clone(), p.clone(), dir.to_string(), session.map(String::from));
+    std::thread::spawn(move || {
+        if let Some(setup) = enabled_cfg(&app, &p.id).and_then(|c| c.sync.setup).filter(|s| !s.trim().is_empty()) {
+            if run_setup_now(&app, &dir, &setup) != 0 {
+                return;
+            }
+        }
+        let runs: Vec<String> = app.state::<Fleet>().runs.lock().values().filter(|r| r.project_id == p.id && r.status == crate::processes::RunStatus::Running && r.session_id == session).map(|r| r.def_id.clone()).collect();
+        let mut restarted = 0;
+        for did in runs {
+            if crate::proc_runtime::restart(&app, &p.id, &did, 120, 32, None).is_ok() {
+                restarted += 1;
+            }
+        }
+        if restarted > 0 {
+            let _ = app.emit("toast", format!("{}: dependencies changed — {restarted} dev process(es) restarted.", p.name));
+        }
+    });
+}
+
+/// The session's branch was shipped (or deleted on GitHub). A sync pass sorts it out under
+/// the session lock (autocommit::run): with nothing after what Ship squashed, the worktree goes
+/// back to a clean detached main; newer commits (or uncommitted leftovers, committed as wip)
+/// move to a new branch on top of main. Nothing is deleted that wasn't shipped.
+pub fn detach_shipped(app: &AppHandle, s: &Session, _default_branch: &str) {
+    if s.worktree_path.as_deref().map(|w| !Path::new(w).is_dir()).unwrap_or(true) {
         return;
     }
-    let _ = git.run(&["branch", "-q", "-D", &branch]);
-    if let Some(mine) = app.state::<SyncState>().presence.lock().remove(&s.id) {
-        autocommit::release_presence(&git, &branch, &mine);
+    // Mid-prompt: its Stop runs the same pass.
+    if find(app, &s.id).map(|(x, _)| x.state == SessionState::Working).unwrap_or(true) {
+        return;
     }
-    crate::update_session(app, &s.id, |x| {
-        x.branch = String::new();
-        x.files_touched.clear();
-        x.line_marks.clear();
-        x.sync = Some(SyncInfo { badge: "new".into(), detail: Some("Shipped ✓ — the next prompt starts a new branch".into()), ..Default::default() });
-        true
+    static RUNNING: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    if RUNNING.lock().contains(&s.id) {
+        return;
+    }
+    RUNNING.lock().push(s.id.clone());
+    let (app, id, branch) = (app.clone(), s.id.clone(), s.branch.clone());
+    std::thread::spawn(move || {
+        // A pass that already ran (Ship, then the fetch after it) leaves nothing to do.
+        if find(&app, &id).is_some_and(|(x, _)| x.branch == branch) {
+            super::sync_session(&app, &id, true);
+        }
+        RUNNING.lock().retain(|x| x != &id);
     });
 }
 
@@ -269,6 +307,7 @@ pub fn rebase_after_ship(app: &AppHandle, id: &str) {
     }
     let main = format!("origin/{}", c.default_branch);
     let old_remote = git.rev(&format!("refs/remotes/origin/{}", s.branch)).unwrap_or_default();
+    let before = git.rev("HEAD").unwrap_or_default();
     if git.run(&["rebase", "--autostash", &main]).is_err() {
         let files = autocommit::conflicted(&git);
         let q = format!("main moved (a Ship). Rebasing {} onto it conflicts in {} — resolve the conflicts and run `git rebase --continue`.", s.branch, files.join(", "));
@@ -283,6 +322,9 @@ pub fn rebase_after_ship(app: &AppHandle, id: &str) {
             i.detail = Some(format!("Conflict with main in {}", files.join(", ")));
         });
         return;
+    }
+    if let Some(after) = git.rev("HEAD") {
+        after_update(app, &p, &wt, Some(id), &before, &after);
     }
     let ctx = presence_ctx(app, id);
     let tag = git.rev(&format!("refs/heads/{}", s.branch)).and_then(|h| presence::make_tag(&git, &h, &ctx.machine, &ctx.install, chrono::Utc::now().timestamp()).ok());
@@ -420,8 +462,22 @@ pub fn sync_open_session(app: AppHandle, session_id: String) {
         let _g = lock.lock();
         let (local, remote) = (git.rev("HEAD"), git.rev(&format!("refs/remotes/origin/{}", s.branch)));
         if let (Some(l), Some(r)) = (local, remote) {
-            if l != r && git.is_ancestor(&l, &r) && git.operation_in_progress().is_none() {
-                let _ = git.run(&["merge", "-q", "--ff-only", &format!("origin/{}", s.branch)]);
+            if l != r && git.operation_in_progress().is_none() {
+                if git.is_ancestor(&l, &r) {
+                    // GitHub has newer commits (another Mac): catch up, or say why not.
+                    match git.run(&["merge", "-q", "--ff-only", &format!("origin/{}", s.branch)]) {
+                        Ok(_) => after_update(&app, &p, &wt, Some(&session_id), &l, &r),
+                        Err(e) => set_sync(&app, &session_id, |i| {
+                            i.badge = "behind".into();
+                            i.detail = Some(format!("GitHub has newer commits on {}, but this worktree couldn't take them: {}", s.branch, e.to_string().lines().last().unwrap_or("")));
+                        }),
+                    }
+                } else if !git.is_ancestor(&r, &l) {
+                    set_sync(&app, &session_id, |i| {
+                        i.badge = "behind".into();
+                        i.detail = Some(format!("This worktree and GitHub's {} have different commits; the next finished prompt rebases onto GitHub's.", s.branch));
+                    });
+                }
             }
         }
         let cur = presence::fetch_one(&git, &s.branch);
@@ -572,6 +628,16 @@ pub fn worktree_on_branch(git: &Git, root: &Path, branch: &str, stem: &str) -> R
             path = Some(p.to_string());
         } else if line == format!("branch refs/heads/{branch}") {
             if let Some(p) = path.filter(|p| Path::new(p).is_dir() && Path::new(p) != root) {
+                // Reused worktree: catch up with GitHub's copy, or refuse to open stale code.
+                let wg = git.at(Path::new(&p));
+                let (l, r) = (wg.rev("HEAD"), wg.rev(&format!("refs/remotes/{origin_b}")));
+                if let (Some(l), Some(r)) = (l, r) {
+                    if l != r && wg.is_ancestor(&l, &r) {
+                        wg.run(&["merge", "-q", "--ff-only", &origin_b]).map_err(|e| format!("{branch} is open in {p}, which couldn't take GitHub's newer commits: {e}"))?;
+                    } else if l != r && !wg.is_ancestor(&r, &l) {
+                        return Err(format!("{branch} is open in {p} with commits GitHub doesn't have, and GitHub has commits it doesn't. Open that session to sync it first."));
+                    }
+                }
                 return Ok(p);
             }
             return Err(format!("{branch} is checked out in the project's main folder. Switch that folder back to main first."));
@@ -587,15 +653,21 @@ pub fn worktree_on_branch(git: &Git, root: &Path, branch: &str, stem: &str) -> R
         Some(l) => {
             let r = git.rev(&format!("refs/remotes/{origin_b}")).unwrap_or_default();
             if l != r && git.is_ancestor(&l, &r) {
-                let _ = git.run(&["branch", "-f", branch, &origin_b]);
+                git.run(&["branch", "-f", branch, &origin_b]).map_err(|e| e.to_string())?;
+            } else if l != r && !git.is_ancestor(&r, &l) {
+                return Err(format!("This Mac's {branch} and GitHub's have different commits. Open the local session that has it to sync it first."));
             }
+            let _ = git.read(&["worktree", "prune"]);
             git.run(&["worktree", "add", "-q", &wt_s, branch]).map_err(|e| e.to_string())?;
         }
         None => {
+            let _ = git.read(&["worktree", "prune"]);
             git.run(&["worktree", "add", "-q", "--track", "-b", branch, &wt_s, &origin_b]).map_err(|e| e.to_string())?;
         }
     }
     let _ = git.at(&wt).read(&["branch", "--set-upstream-to", &origin_b, branch]);
+    // Like every other worktree: its .env and dependencies.
+    crate::worktree::prepare(root, &wt);
     Ok(wt_s)
 }
 
@@ -656,6 +728,10 @@ pub async fn sync_clone(app: AppHandle, repo: String, parent: String) -> Result<
         }
         let p = crate::add_project(dest.to_string_lossy().to_string(), app.state::<Fleet>(), app.clone())?;
         refresh_configs(&app, Some(&p.id));
+        // A fresh clone has no dependencies yet: run the project's setup in the main folder.
+        if let Some(setup) = enabled_cfg(&app, &p.id).and_then(|c| c.sync.setup).filter(|s| !s.trim().is_empty()) {
+            run_setup(&app, &p.root_path, &setup);
+        }
         if let Some(pp) = app.state::<Fleet>().store.lock().projects.iter().find(|x| x.id == p.id).cloned() {
             fetch_project(&app, &pp);
         }

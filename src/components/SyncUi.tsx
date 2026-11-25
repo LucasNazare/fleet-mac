@@ -19,13 +19,14 @@ const BADGE: Record<string, { text: (s: Session) => string; color: string }> = {
   taken_over: { text: () => "⇄ taken over", color: "var(--amber)" },
   error: { text: () => "✕ sync failed", color: "var(--red)" },
   new: { text: () => "new branch on first prompt", color: "var(--muted)" },
+  behind: { text: () => "↓ behind GitHub", color: "var(--amber)" },
 };
 
 /** "✓ pushed" / "↑ 1 waiting" / "⚠ conflict" / "⏸ paused" on a session row. */
 export function SyncBadge({ s }: { s: Session }) {
   const b = s.sync ? BADGE[s.sync.badge] : null;
   if (!b || s.remote) return null;
-  const retry = s.sync!.badge === "waiting" || s.sync!.badge === "error";
+  const retry = s.sync!.badge === "waiting" || s.sync!.badge === "error" || s.sync!.badge === "behind";
   const taken = s.sync!.badge === "taken_over";
   const conflict = s.sync!.badge === "conflict" && !!s.branch && s.state !== "working";
   const tip = [s.branch && `⎇ ${s.branch}`, s.sync!.detail, s.sync!.lastPushAt && `pushed ${relTime(s.sync!.lastPushAt / 1000)}`, retry && "Click to retry now", taken && "Click to take it over", conflict && "Click to fix it with Claude"].filter(Boolean).join("\n");
@@ -58,8 +59,12 @@ export function SyncStatusItem({ now }: { now: number }) {
   if (!status.anySynced) return null;
   let text: string;
   let color = "var(--muted)";
+  const problems = Object.entries(status.problems ?? {});
   if (status.pausedAll) text = "⏸ sync paused";
-  else if (status.offline) {
+  else if (problems.length) {
+    text = `⚠ GitHub: ${problems.length === 1 ? problems[0][0] : `${problems.length} projects`}`;
+    color = "var(--red)";
+  } else if (status.offline) {
     text = `offline${status.waiting ? ` · ${status.waiting} waiting` : ""}`;
     color = "var(--amber)";
   } else if (status.waiting) {
@@ -76,11 +81,12 @@ export function SyncStatusItem({ now }: { now: number }) {
       <button className="status-count" style={{ color }} onClick={(e) => {
         const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
         setMenu((m) => (m ? null : { left: Math.max(8, Math.min(r.left, window.innerWidth - 240)), bottom: window.innerHeight - r.top + 4 }));
-      }} data-testid="sync-status" title="GitHub sync">
+      }} data-testid="sync-status" title={problems.length ? problems.map(([p, m]) => `${p}: ${m}`).join("\n") : "GitHub sync"}>
         {text}
       </button>
       {menu && (
         <div className="menu sync-menu" style={menu} onMouseLeave={() => setMenu(null)}>
+          {problems.map(([p, m]) => <div key={p} className="menu-note small" data-testid="sync-problem"><b>{p}</b>: {m}</div>)}
           <button className="menu-item" onClick={openLog}>Sync log</button>
           <button className="menu-item" onClick={() => { setMenu(null); void invoke("sync_now"); }}>Sync now</button>
           <button className="menu-item" onClick={() => { setMenu(null); void invoke("sync_set_paused", { projectId: null, paused: !status.pausedAll }); }} data-testid="pause-all">

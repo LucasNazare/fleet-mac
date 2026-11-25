@@ -57,7 +57,20 @@ pub fn run_claude_p(claude: &Path, model: &str, cwd: &Path, prompt: &str) -> any
     .stderr(Stdio::piped());
     let mut child = cmd.spawn()?;
     child.stdin.take().unwrap().write_all(prompt.as_bytes())?;
-    let out = child.wait_with_output()?;
+    // A hung `claude -p` must not hold the session's sync (and the fetch loop) forever:
+    // after 90 s it's killed and callers fall back (plain commit message, old title).
+    let pid = child.id();
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        if done_rx.recv_timeout(std::time::Duration::from_secs(90)).is_err() {
+            unsafe {
+                libc::kill(pid as i32, libc::SIGKILL);
+            }
+        }
+    });
+    let out = child.wait_with_output();
+    let _ = done_tx.send(());
+    let out = out?;
     let stdout = String::from_utf8_lossy(&out.stdout);
     let v = serde_json::from_str::<serde_json::Value>(&stdout).ok();
     if let Some(v) = &v {

@@ -113,6 +113,29 @@ pub fn assign(files: &[String], touched: &[(String, Vec<String>)]) -> (BTreeMap<
     (owned, rest)
 }
 
+/// Drop one stash entry by its sha. The stash list is shared by every worktree of the repo,
+/// so never by position alone.
+pub fn drop_stash(git: &Git, sha: &str) {
+    let list = git.read(&["stash", "list", "--format=%H"]).unwrap_or_default();
+    if let Some(i) = list.lines().position(|l| l.trim() == sha) {
+        let _ = git.run(&["stash", "drop", "-q", &format!("stash@{{{i}}}")]);
+    }
+}
+
+/// The folder is on another branch while local main has commits GitHub doesn't (and the
+/// folder's HEAD doesn't carry them): resetting main would strand them. Their count.
+pub fn stranded_main(git: &Git, work: &LocalWork, default_branch: &str) -> Option<u32> {
+    if work.branch.as_deref() == Some(default_branch) {
+        return None;
+    }
+    let local = git.rev(&format!("refs/heads/{default_branch}"))?;
+    let origin = git.rev(&format!("refs/remotes/origin/{default_branch}"))?;
+    if git.is_ancestor(&local, &origin) || git.is_ancestor(&local, "HEAD") {
+        return None;
+    }
+    git.read(&["rev-list", "--count", &format!("{origin}..{local}")]).ok().and_then(|n| n.trim().parse().ok()).filter(|n| *n > 0)
+}
+
 /// Put the main folder back on origin's main once its work has moved out.
 pub fn reset_main(git: &Git, work: &LocalWork, default_branch: &str) -> GResult<()> {
     let origin = format!("refs/remotes/origin/{default_branch}");
@@ -186,5 +209,30 @@ mod tests {
     fn project_dir_encoding() {
         let d = claude_project_dir("/Users/x/Desktop/flat/fleet/.fleet/worktrees/a_b");
         assert!(d.ends_with(".claude/projects/-Users-x-Desktop-flat-fleet--fleet-worktrees-a-b"), "{d:?}");
+    }
+
+    #[test]
+    fn stash_is_dropped_by_sha_not_position() {
+        let fx = Fixture::new("stashdrop");
+        let a = fx.clone("a");
+        let g = fx.git(&a);
+        sh(&a, "echo 1 > a.txt && git stash push -q -m mine");
+        let mine = g.rev("refs/stash").unwrap();
+        sh(&a, "echo 2 > a.txt && git stash push -q -m theirs");
+        drop_stash(&g, &mine);
+        let left = g.read(&["stash", "list", "--format=%s"]).unwrap();
+        assert!(left.contains("theirs") && !left.contains("mine"), "{left}");
+    }
+
+    #[test]
+    fn local_main_commits_are_not_stranded() {
+        let fx = Fixture::new("stranded");
+        let a = fx.clone("a");
+        let g = fx.git(&a);
+        sh(&a, "echo x > x.txt && git add x.txt && git commit -qm local && git switch -q -c side origin/main");
+        let work = scan(&g, "main");
+        assert_eq!(stranded_main(&g, &work, "main"), Some(1));
+        sh(&a, "git switch -q main");
+        assert_eq!(stranded_main(&g, &scan(&g, "main"), "main"), None);
     }
 }

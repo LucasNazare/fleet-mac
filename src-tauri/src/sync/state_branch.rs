@@ -32,6 +32,9 @@ pub struct SessionFile {
     /// Main moved under this branch (a Ship) and no Mac held it: the next Mac to open it rebases.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub needs_rebase: bool,
+    /// GitHub's tip of this branch when Ship squashed it. Commits after it weren't shipped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shipped_tip: Option<String>,
     /// Opt-in chat sync: the claude session whose transcript is in transcripts/<name>.jsonl.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_session_id: Option<String>,

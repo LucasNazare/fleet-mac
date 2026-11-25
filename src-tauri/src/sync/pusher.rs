@@ -73,7 +73,31 @@ pub fn check(specs: &[Refspec], protected: &[String], main: Option<&MainPush>) -
     Ok(())
 }
 
+/// Signed out, wrong account, no access or the repo is gone: retrying won't help, the user
+/// has to act. Checked before is_offline (git words several of these like network errors).
+pub fn is_auth(stderr: &str) -> bool {
+    let s = stderr.to_lowercase();
+    [
+        "authentication failed",
+        "permission denied",
+        "could not read username",
+        "could not read password",
+        "terminal prompts disabled",
+        "invalid username or password",
+        "repository not found",
+        "the requested url returned error: 403",
+        "the requested url returned error: 401",
+        "error: 403",
+        "host key verification failed",
+    ]
+    .iter()
+    .any(|m| s.contains(m))
+}
+
 pub fn is_offline(stderr: &str) -> bool {
+    if is_auth(stderr) {
+        return false;
+    }
     let s = stderr.to_lowercase();
     [
         "could not resolve host",
@@ -145,6 +169,8 @@ pub fn push(git: &Git, specs: &[Refspec], leases: &[Lease], main: Option<&MainPu
                 PushOutcome::LeaseLost(stale, e.stderr)
             } else if !rejected.is_empty() {
                 PushOutcome::Rejected(rejected, e.stderr)
+            } else if is_auth(&e.stderr) {
+                PushOutcome::Failed(format!("GitHub refused fleet's sign-in or access to this repo — sign in again (GitHub sync dialog → Sign in, or `gh auth login`). {}", e.stderr.trim().lines().last().unwrap_or("")))
             } else if is_offline(&e.stderr) {
                 PushOutcome::Offline(e.stderr.trim().lines().last().unwrap_or("offline").to_string())
             } else {
@@ -210,6 +236,17 @@ pub fn guard_manual(root: &Path, push_args: &[String]) -> Result<(), String> {
 mod tests {
     use super::super::gitx::testutil::{sh, Fixture};
     use super::*;
+
+    #[test]
+    fn auth_errors_are_not_offline() {
+        let ssh = "git@github.com: Permission denied (publickey).\nfatal: Could not read from remote repository.";
+        let https = "remote: Repository not found.\nfatal: repository 'https://github.com/x/y.git/' not found";
+        let gone = "fatal: could not read Username for 'https://github.com': terminal prompts disabled";
+        for e in [ssh, https, gone] {
+            assert!(is_auth(e) && !is_offline(e), "{e}");
+        }
+        assert!(is_offline("ssh: Could not resolve hostname github.com\nfatal: Could not read from remote repository."));
+    }
 
     #[test]
     fn main_needs_a_main_push() {
