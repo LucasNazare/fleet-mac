@@ -20,3 +20,11 @@
   machine: MacBook Pro de Lucas
   at: 2026-11-25T03:15:58Z
   result: shipped
+- tag: ship-20261125-1442
+  commit: f4abd6aabee0a99bcc3c1de9ad75279202ca4aa4
+  branches:
+  - fleet/wh-fix-duplicate-paste-and-apostrophe-doubl
+  - fleet/wr-weird-behaviours
+  machine: MacBook Pro de Lucas
+  at: 2026-11-25T17:42:55Z
+  result: shipped

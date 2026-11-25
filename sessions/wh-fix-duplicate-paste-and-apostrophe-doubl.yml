@@ -13,5 +13,6 @@ recap:
 - Existing main-flows and git-editor tests still pass
 - Nothing committed; needs a manual check in tauri dev
 lastMachine: MacBook Pro de Lucas
-updatedAt: 2026-11-25T17:13:50Z
-archived: false
+updatedAt: 2026-11-25T17:42:55Z
+archived: true
+shippedTip: 8ef1f0ba3f7a646e66883fe555a60d233c8e64fc

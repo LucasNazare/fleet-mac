@@ -28,5 +28,6 @@ recap:
 - Needs `npx playwright install webkit` before the next e2e run
 - 'Still to do by hand: WhatsApp (35 GB) and Docker (28 GB)'
 lastMachine: MacBook Pro de Lucas
-updatedAt: 2026-11-25T17:40:11Z
-archived: false
+updatedAt: 2026-11-25T17:42:55Z
+archived: true
+shippedTip: 12ee3497a0e448dc38a95a8cfd182591c95b8566
