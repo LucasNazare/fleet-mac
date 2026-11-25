@@ -1,0 +1,21 @@
+# fleet project config. Reaches main through Ship, like code.
+# Never put secret values here: `env` lists variable names, values come from your .env files.
+project: "fleet"
+processes:
+  - name: "npm run dev"
+    command: "npm run dev"
+    cwd: "."
+    autoStart: false
+    autoRestart: false
+sync:
+  enabled: true
+  branchPrefix: fleet/
+  fetchIntervalSec: 120
+  setup: "npm ci"   # runs in each new session worktree
+  checks: ["npm run typecheck"]
+  # deployCommand: ./deploy.sh   # optional; Ship runs it after main is pushed
+  mergeStyle: squash
+  mainIsProtected: false
+claude:
+  defaultArgs: []
+  titleModel: haiku
