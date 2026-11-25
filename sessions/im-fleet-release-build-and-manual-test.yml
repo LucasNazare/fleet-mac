@@ -1,7 +1,7 @@
 branch: fleet/im-fleet-release-build-and-manual-test
 glyph: IM
 color: '#FFA657'
-title: Adding processes to synced fleet.yml
+title: Explain fleet's ghost rows from closed
 titleHistory:
 - '[Image #1]'
 - Fix Ship hanging on no-op branches
@@ -10,14 +10,15 @@ titleHistory:
 - Fleet release build and manual test
 - Fleet restarted on new merge-check build
 - Atrium-v2 worktree cleanup safety check
+- Adding processes to synced fleet.yml
 state: needs_reply
-prompts: 7
+prompts: 8
 recap:
-- Synced projects keep their process list in fleet.yml, so the old add dialog is gone by design
-- Add processes through the YAML editor behind "+ Add process (fleet.yml)"
-- Saved edits commit to a fleet/config branch and reach main with the next Ship
-- Offered to restore the dialog for synced projects, writing into fleet.yml and keeping comments
-- Awaiting the user's decision on restoring the dialog
+- Closed the atrium-v2 sessions and removed their worktrees
+- Two leftover rows (KN, LC) show up because their branches still exist on GitHub
+- Fleet lists them as other computers since no session here claims them
+- Suggested deleting both remote branches, which only the user can run
+- 'Offered a fleet fix: label rows last used here, or add a Discard option'
 lastMachine: MacBook Pro de Lucas
-updatedAt: 2026-11-25T19:05:32Z
+updatedAt: 2026-11-25T19:06:44Z
 archived: false
