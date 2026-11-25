@@ -1,7 +1,7 @@
 branch: fleet/im-fleet-release-build-and-manual-test
 glyph: IM
 color: '#FFA657'
-title: Explain fleet's ghost rows from closed
+title: Remove stale branch rows from fleet
 titleHistory:
 - '[Image #1]'
 - Fix Ship hanging on no-op branches
@@ -11,14 +11,14 @@ titleHistory:
 - Fleet restarted on new merge-check build
 - Atrium-v2 worktree cleanup safety check
 - Adding processes to synced fleet.yml
-state: needs_reply
-prompts: 8
+- Explain fleet's ghost rows from closed
+state: done
+prompts: 9
 recap:
-- Closed the atrium-v2 sessions and removed their worktrees
-- Two leftover rows (KN, LC) show up because their branches still exist on GitHub
-- Fleet lists them as other computers since no session here claims them
-- Suggested deleting both remote branches, which only the user can run
-- 'Offered a fleet fix: label rows last used here, or add a Discard option'
+- Deleted the two stale branches on GitHub
+- fleet archives their sessions on the next fetch
+- '"On other computers" rows will disappear'
+- 'Optional: "Not open here" label and Discard button'
 lastMachine: MacBook Pro de Lucas
-updatedAt: 2026-11-25T19:06:44Z
+updatedAt: 2026-11-25T19:07:07Z
 archived: false
