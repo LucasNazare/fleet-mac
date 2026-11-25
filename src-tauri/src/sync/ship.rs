@@ -224,6 +224,18 @@ fn is_protected_rejection(msg: &str) -> bool {
     m.contains("protected branch") || m.contains("gh006") || m.contains("gh013") || m.contains("repository rule violations")
 }
 
+/// Merging `branch` into `main` would change nothing: its commits are only merges of main, or
+/// work main already has. Then Ship would stop with "Nothing to ship". A conflict, or a git
+/// too old for `merge-tree --write-tree`, counts as "has changes" (Ship decides).
+pub fn adds_nothing(g: &Git, main: &str, branch: &str) -> bool {
+    let merged = g.read(&["merge-tree", "--write-tree", main, branch]);
+    let main_tree = g.read(&["rev-parse", &format!("{main}^{{tree}}")]);
+    match (merged, main_tree) {
+        (Ok(m), Ok(t)) => m.lines().next().map(str::trim) == Some(t.trim()),
+        _ => false,
+    }
+}
+
 pub fn ship(inp: &ShipInput) -> ShipOutcome {
     let mut out = ShipOutcome::default();
     let g = inp.git;
@@ -527,6 +539,25 @@ mod tests {
             via_pr: None,
             stamp: "20261123-1402".into(),
         }
+    }
+
+    #[test]
+    fn adds_nothing_sees_through_merges_of_main() {
+        let fx = Fixture::new("addsnothing");
+        let a = fx.clone("a");
+        let g = fx.git(&a);
+        // Only merges main back in: commits ahead, but nothing to ship.
+        sh(&a, "git switch -q -c fleet/m && git switch -q main && echo x > x.txt && git add x.txt && git commit -qm x && git switch -q fleet/m && git merge -q --no-ff --no-edit main");
+        assert!(adds_nothing(&g, "main", "fleet/m"));
+        // Same change made on both sides.
+        sh(&a, "git switch -q -c fleet/dup main~1 && echo x > x.txt && git add x.txt && git commit -qm dup");
+        assert!(adds_nothing(&g, "main", "fleet/dup"));
+        // Real work.
+        sh(&a, "git switch -q -c fleet/w main && echo w > w.txt && git add w.txt && git commit -qm w");
+        assert!(!adds_nothing(&g, "main", "fleet/w"));
+        // Conflicts are Ship's call.
+        sh(&a, "git switch -q -c fleet/c main~1 && echo other > x.txt && git add x.txt && git commit -qm c");
+        assert!(!adds_nothing(&g, "main", "fleet/c"));
     }
 
     #[test]

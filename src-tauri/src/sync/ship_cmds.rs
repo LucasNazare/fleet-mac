@@ -73,7 +73,7 @@ pub async fn ship_info(app: AppHandle, project_id: String) -> Result<ShipInfo, S
             let commits = ahead(&f.branch);
             let s = local.iter().find(|s| s.branch == f.branch);
             let mut reason = None;
-            if commits == 0 {
+            if commits == 0 || ship::adds_nothing(&git, &main_ref, &format!("refs/remotes/origin/{}", f.branch)) {
                 reason = Some("Nothing new vs main".to_string());
             } else if let Some(s) = s {
                 let local_head = git.rev(&format!("refs/heads/{}", f.branch));
@@ -112,7 +112,7 @@ pub async fn ship_info(app: AppHandle, project_id: String) -> Result<ShipInfo, S
                 continue;
             }
             let commits = ahead(b);
-            if commits == 0 {
+            if commits == 0 || ship::adds_nothing(&git, &main_ref, &format!("refs/remotes/origin/{b}")) {
                 continue;
             }
             let subject = git.read(&["log", "-1", "--format=%s", &format!("refs/remotes/origin/{b}")]).unwrap_or_default().trim().to_string();
@@ -294,7 +294,18 @@ pub async fn ship_run(app: AppHandle, project_id: String, branches: Vec<String>)
     .await
     .map_err(|e| e.to_string());
     shipping().lock().remove(&p.id);
-    res?
+    // Every finished run ends the sheet's "Shipping…", including ones where main didn't move
+    // ("Nothing to ship", offline, rejected): the sheet waits for this event.
+    let res = res.and_then(|r| r);
+    match &res {
+        Ok(out) => {
+            let _ = app.emit("ship-done", serde_json::json!({ "projectId": p.id, "outcome": out }));
+        }
+        Err(_) => {
+            let _ = app.emit("ship-done", serde_json::json!({ "projectId": p.id }));
+        }
+    }
+    res
 }
 
 fn run_ship(app: &AppHandle, p: &Project, branches: &[String]) -> Result<ship::ShipOutcome, String> {
@@ -386,7 +397,6 @@ fn run_ship(app: &AppHandle, p: &Project, branches: &[String]) -> Result<ship::S
         let app = app.clone();
         std::thread::spawn(move || fetch_project(&app, &pp));
     }
-    let _ = app.emit("ship-done", serde_json::json!({ "projectId": p.id, "outcome": &out }));
     Ok(out)
 }
 

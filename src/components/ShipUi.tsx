@@ -1,6 +1,6 @@
 // Stage B/C UI: sessions on other computers, Ship (⌘⇧D), Add project from GitHub, Actions cost guard.
 import { useEffect, useMemo, useState } from "react";
-import type { GhRepo, OtherSession, ShipInfo, ShippedCommit, WorkflowFinding } from "../types";
+import type { GhRepo, OtherSession, ShipInfo, ShipOutcome, ShippedCommit, WorkflowFinding } from "../types";
 import { useFleet } from "../store/store";
 import { useSync } from "../store/sync";
 import { backend, invoke } from "../ipc";
@@ -128,7 +128,8 @@ export function ShipSheet() {
   const start = async () => {
     useSync.setState((s) => ({ runs: { ...s.runs, [projectId]: { running: true, log: "", steps: [], outcome: null } } }));
     try {
-      await invoke("ship_run", { projectId, branches: chosen });
+      const outcome = await invoke<ShipOutcome>("ship_run", { projectId, branches: chosen });
+      useSync.setState((s) => ({ runs: { ...s.runs, [projectId]: { ...s.runs[projectId], running: false, outcome } } }));
     } catch (e) {
       useFleet.getState().showToast(String(e), "error");
       useSync.setState((s) => ({ runs: { ...s.runs, [projectId]: { ...s.runs[projectId], running: false } } }));
