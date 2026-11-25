@@ -1,17 +1,19 @@
 branch: fleet/im-fix-ship-hanging-on-no-op-branches
 glyph: IM
 color: '#FFA657'
-title: 'Ship: flag branches that add nothing'
+title: 'Fleet fix: ship to main, then'
 titleHistory:
 - '[Image #1]'
 - Fix Ship hanging on no-op branches
+- 'Ship: flag branches that add nothing'
 state: done
-prompts: 2
+prompts: 3
 recap:
-- Added adds_nothing() check in ship.rs to detect branches identical to main after a trial merge
-- ship_info now hides branches that would change nothing and flags KN as "Nothing new vs main"
-- Added a test covering merge-only, same-change-both-sides, real-work, and conflict cases
-- All 114 Rust tests pass; changes uncommitted, rebuild app to see them
+- Fix lives in this session's fleet worktree branch, not main, so a build from main would miss it
+- Ship the branch from fleet's Ship sheet (⌘⇧D); the typecheck passes and main gets pushed
+- Pull main into ~/Desktop/flat/fleet and run ./scripts/release.sh to build the new .app and .dmg
+- User quits fleet and relaunches the new build themselves, since that ends this session
+- 'Fallback: build from this worktree now, but the next main build reintroduces the bug'
 lastMachine: MacBook Pro de Lucas
-updatedAt: 2026-11-25T18:25:47Z
+updatedAt: 2026-11-25T18:30:42Z
 archived: false
