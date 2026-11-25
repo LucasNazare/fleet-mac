@@ -1,0 +1,19 @@
+branch: fleet/im-fleet-release-build-and-manual-test
+glyph: IM
+color: '#FFA657'
+title: Fleet release build and manual test
+titleHistory:
+- '[Image #1]'
+- Fix Ship hanging on no-op branches
+- 'Ship: flag branches that add nothing'
+- 'Fleet fix: ship to main, then'
+state: done
+prompts: 4
+recap:
+- Release build running via ./scripts/release.sh in main checkout
+- Quit fleet with ⌘Q once the build finishes
+- Launch new build from the release bundle or replace /Applications copy
+- 'Verify on Ship/atrium-v2: KN row says "Nothing new vs main"'
+lastMachine: MacBook Pro de Lucas
+updatedAt: 2026-11-25T18:31:45Z
+archived: false
