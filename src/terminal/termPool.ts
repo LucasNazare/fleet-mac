@@ -189,7 +189,11 @@ function textInput(el: HTMLElement, send: (data: string) => void) {
     ev.stopImmediatePropagation();
     return true;
   };
-  const flush = (ta: HTMLTextAreaElement) => {
+  // `clear`: empty the textarea once this burst of events is over. Not after a compositionend:
+  // WebKit may follow a dead key's commit with an insertText that *replaces* it (' then s →
+  // compositionend "'" … insertText "'s"), in a later task. Emptying the value in between made
+  // that insert look like new text, and "let's" came out as "let''s".
+  const flush = (ta: HTMLTextAreaElement, clear: boolean) => {
     if (composing) return;
     const v = ta.value;
     let i = 0;
@@ -199,7 +203,7 @@ function textInput(el: HTMLElement, send: (data: string) => void) {
     sent = v;
     if (added) send(added);
     clearTimeout(clearTimer);
-    clearTimer = window.setTimeout(() => {
+    if (clear) clearTimer = window.setTimeout(() => {
       if (!composing && ta.value === sent) ta.value = sent = "";
     }, 0);
   };
@@ -208,10 +212,19 @@ function textInput(el: HTMLElement, send: (data: string) => void) {
   el.addEventListener("compositionend", (ev) => {
     if (!own(ev)) return;
     composing = false;
-    flush(ev.target as HTMLTextAreaElement);
+    flush(ev.target as HTMLTextAreaElement, false);
   }, true);
   el.addEventListener("input", (ev) => {
-    if (own(ev)) flush(ev.target as HTMLTextAreaElement);
+    if (own(ev)) flush(ev.target as HTMLTextAreaElement, true);
+  }, true);
+  // xterm.js's own paste listener (on the textarea, runs after this) sends the clipboard but
+  // doesn't cancel the event, so WebKit also inserted it into the textarea and the input
+  // listener above sent it a second time. xterm empties the textarea; start the diff afresh.
+  el.addEventListener("paste", (ev) => {
+    if (!(ev.target instanceof HTMLTextAreaElement)) return;
+    ev.preventDefault();
+    clearTimeout(clearTimer);
+    sent = "";
   }, true);
   el.addEventListener("keydown", (ev) => { if (ev.target instanceof HTMLTextAreaElement) trace(ev); }, true);
 }

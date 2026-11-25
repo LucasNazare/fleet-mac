@@ -205,3 +205,59 @@ test("dead keys: ' then r types 'r once, ' then a types á, whatever order WebKi
   await page.keyboard.type("e");
   await expect.poll(async () => (await typed()).slice(start)).toBe("we'r'rá's'se");
 });
+
+test("dead key commit followed by a later insertText that replaces it types 's once", async ({ page }) => {
+  await page.goto("/");
+  await addProject(page);
+  await page.keyboard.press("Meta+n");
+  const ta = page.locator(".term-host .xterm-helper-textarea").first();
+  await expect(ta).toBeAttached();
+  await ta.focus();
+  const typed = () => page.evaluate(() => (window as any).__fleetMock.ptyWrites.map((w: any) => w.data).join(""));
+  const start = (await typed()).length;
+  await page.keyboard.type("let");
+  // In the real app WebKit delivers the replacing insertText in a later task than compositionend.
+  await page.evaluate(async () => {
+    const t = document.activeElement as HTMLTextAreaElement;
+    const tick = () => new Promise((r) => setTimeout(r, 20));
+    const compAt = t.value.length;
+    t.dispatchEvent(new CompositionEvent("compositionstart", { data: "", bubbles: true }));
+    t.value = t.value.slice(0, compAt) + "'";
+    t.dispatchEvent(new CompositionEvent("compositionupdate", { data: "'", bubbles: true }));
+    t.dispatchEvent(new InputEvent("input", { inputType: "insertCompositionText", data: "'", bubbles: true }));
+    await tick();
+    t.dispatchEvent(new CompositionEvent("compositionend", { data: "'", bubbles: true }));
+    await tick();
+    t.value = t.value.slice(0, compAt) + "'s";
+    t.dispatchEvent(new InputEvent("input", { inputType: "insertText", data: "'s", bubbles: true }));
+    await tick();
+  });
+  await page.keyboard.type(" go");
+  await expect.poll(async () => (await typed()).slice(start)).toBe("let's go");
+});
+
+test("paste sends the clipboard once", async ({ page }) => {
+  await page.goto("/");
+  await addProject(page);
+  await page.keyboard.press("Meta+n");
+  const ta = page.locator(".term-host .xterm-helper-textarea").first();
+  await expect(ta).toBeAttached();
+  await ta.focus();
+  const typed = () => page.evaluate(() => (window as any).__fleetMock.ptyWrites.map((w: any) => w.data).join(""));
+  const start = (await typed()).length;
+  await page.evaluate(async () => {
+    const t = document.activeElement as HTMLTextAreaElement;
+    const dt = new DataTransfer();
+    dt.setData("text/plain", "hello world");
+    const ev = new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true });
+    t.dispatchEvent(ev);
+    // What WebKit does when the paste isn't cancelled.
+    if (!ev.defaultPrevented) {
+      t.value += "hello world";
+      t.dispatchEvent(new InputEvent("input", { inputType: "insertFromPaste", data: "hello world", bubbles: true }));
+    }
+    await new Promise((r) => setTimeout(r, 20));
+  });
+  await page.keyboard.type("!");
+  await expect.poll(async () => (await typed()).slice(start)).toBe("hello world!");
+});
