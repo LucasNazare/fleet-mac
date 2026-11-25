@@ -20,7 +20,7 @@ titleHistory:
 - Find more disk space to free
 - Freed 10 GB by clearing caches
 state: done
-prompts: 27
+prompts: 28
 recap:
 - Deleted the safe group; free space went from 14 GB to 24 GB
 - Removed Chrome, Playwright/Puppeteer, npm, TypeScript, node-gyp and pip caches
@@ -28,5 +28,5 @@ recap:
 - Needs `npx playwright install webkit` before the next e2e run
 - 'Still to do by hand: WhatsApp (35 GB) and Docker (28 GB)'
 lastMachine: MacBook Pro de Lucas
-updatedAt: 2026-11-25T17:02:21Z
+updatedAt: 2026-11-25T17:08:00Z
 archived: false
