@@ -1,17 +1,17 @@
 branch: fleet/im-fix-ship-hanging-on-no-op-branches
 glyph: IM
 color: '#FFA657'
-title: Fix Ship hanging on no-op branches
+title: 'Ship: flag branches that add nothing'
 titleHistory:
 - '[Image #1]'
+- Fix Ship hanging on no-op branches
 state: done
-prompts: 1
+prompts: 2
 recap:
-- 'Found the hang: Ship finished but never sent the done event'
-- Ship now reports every finished run, including 'nothing to ship' errors
-- Sheet also closes from ship_run's return value as a fallback
-- Typecheck and cargo check pass; e2e tests were already failing
-- Rebuild the app to pick up the fix; nothing committed yet
+- Added adds_nothing() check in ship.rs to detect branches identical to main after a trial merge
+- ship_info now hides branches that would change nothing and flags KN as "Nothing new vs main"
+- Added a test covering merge-only, same-change-both-sides, real-work, and conflict cases
+- All 114 Rust tests pass; changes uncommitted, rebuild app to see them
 lastMachine: MacBook Pro de Lucas
-updatedAt: 2026-11-25T18:19:45Z
+updatedAt: 2026-11-25T18:25:47Z
 archived: false
