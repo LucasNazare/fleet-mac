@@ -1,19 +1,21 @@
 branch: fleet/im-fleet-release-build-and-manual-test
 glyph: IM
 color: '#FFA657'
-title: Fleet release build and manual test
+title: Fleet restarted on new merge-check build
 titleHistory:
 - '[Image #1]'
 - Fix Ship hanging on no-op branches
 - 'Ship: flag branches that add nothing'
 - 'Fleet fix: ship to main, then'
+- Fleet release build and manual test
 state: done
-prompts: 4
+prompts: 5
 recap:
-- Release build running via ./scripts/release.sh in main checkout
-- Quit fleet with ⌘Q once the build finishes
-- Launch new build from the release bundle or replace /Applications copy
-- 'Verify on Ship/atrium-v2: KN row says "Nothing new vs main"'
+- Fleet relaunched at 15:36 from the 15:34 main build
+- New merge check is included, so both fixes are live
+- The .dmg step was cut off, so no new .dmg exists
+- /Applications/fleet.app is still the old version
+- 'Verify in Ship on atrium-v2 (⌘⇧D): KN shows "Nothing new vs main"'
 lastMachine: MacBook Pro de Lucas
-updatedAt: 2026-11-25T18:31:45Z
+updatedAt: 2026-11-25T18:37:33Z
 archived: false
