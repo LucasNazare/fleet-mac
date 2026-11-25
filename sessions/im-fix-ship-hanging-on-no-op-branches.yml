@@ -1,0 +1,17 @@
+branch: fleet/im-fix-ship-hanging-on-no-op-branches
+glyph: IM
+color: '#FFA657'
+title: Fix Ship hanging on no-op branches
+titleHistory:
+- '[Image #1]'
+state: done
+prompts: 1
+recap:
+- 'Found the hang: Ship finished but never sent the done event'
+- Ship now reports every finished run, including 'nothing to ship' errors
+- Sheet also closes from ship_run's return value as a fallback
+- Typecheck and cargo check pass; e2e tests were already failing
+- Rebuild the app to pick up the fix; nothing committed yet
+lastMachine: MacBook Pro de Lucas
+updatedAt: 2026-11-25T18:19:45Z
+archived: false
