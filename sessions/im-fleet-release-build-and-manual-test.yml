@@ -1,7 +1,7 @@
 branch: fleet/im-fleet-release-build-and-manual-test
 glyph: IM
 color: '#FFA657'
-title: Remove stale branch rows from fleet
+title: Ship dialog skipped bg-bug-fixes branch
 titleHistory:
 - '[Image #1]'
 - Fix Ship hanging on no-op branches
@@ -12,13 +12,15 @@ titleHistory:
 - Atrium-v2 worktree cleanup safety check
 - Adding processes to synced fleet.yml
 - Explain fleet's ghost rows from closed
-state: done
-prompts: 9
+- Remove stale branch rows from fleet
+state: needs_reply
+prompts: 10
 recap:
-- Deleted the two stale branches on GitHub
-- fleet archives their sessions on the next fetch
-- '"On other computers" rows will disappear'
-- 'Optional: "Not open here" label and Discard button'
+- ⌘⇧D is Ship to main, not a deploy shortcut; it merges ticked branches and runs deployCommand
+- fleet/bg-bug-fixes was left out because its session was still finishing when the dialog opened
+- The 14:57 deploy shipped only the other two branches; the fix is not live
+- To ship it, press ⌘⇧D again with bg-bug-fixes ticked
+- Offered a dialog refresh fix and a post-Ship toast; awaiting your go-ahead
 lastMachine: MacBook Pro de Lucas
-updatedAt: 2026-11-25T19:07:07Z
+updatedAt: 2026-11-27T18:15:32Z
 archived: false
