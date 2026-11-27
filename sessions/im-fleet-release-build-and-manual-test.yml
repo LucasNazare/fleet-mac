@@ -1,7 +1,7 @@
 branch: fleet/im-fleet-release-build-and-manual-test
 glyph: IM
 color: '#FFA657'
-title: Ship dialog skipped bg-bug-fixes branch
+title: Ship deploys main plus ticked branches
 titleHistory:
 - '[Image #1]'
 - Fix Ship hanging on no-op branches
@@ -13,14 +13,15 @@ titleHistory:
 - Adding processes to synced fleet.yml
 - Explain fleet's ghost rows from closed
 - Remove stale branch rows from fleet
-state: needs_reply
-prompts: 10
+- Ship dialog skipped bg-bug-fixes branch
+state: done
+prompts: 11
 recap:
-- ⌘⇧D is Ship to main, not a deploy shortcut; it merges ticked branches and runs deployCommand
-- fleet/bg-bug-fixes was left out because its session was still finishing when the dialog opened
-- The 14:57 deploy shipped only the other two branches; the fix is not live
-- To ship it, press ⌘⇧D again with bg-bug-fixes ticked
-- Offered a dialog refresh fix and a post-Ship toast; awaiting your go-ahead
+- Ship deploys all of main, plus any ticked branches merged in
+- Each Ship merges ticked branches into a clean main copy, pushes it, and deploys
+- The 14:57 Ship deployed 6a42c2d, including the earlier BUG FIXES work
+- Later BUG FIXES commits like 3db2abc and 73f1b3a never reached main
+- Tick BUG FIXES and press ⌘⇧D again to deploy them
 lastMachine: MacBook Pro de Lucas
-updatedAt: 2026-11-27T18:15:32Z
+updatedAt: 2026-11-27T18:29:44Z
 archived: false
