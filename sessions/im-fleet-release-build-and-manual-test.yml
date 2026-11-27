@@ -1,7 +1,7 @@
 branch: fleet/im-fleet-release-build-and-manual-test
 glyph: IM
 color: '#FFA657'
-title: Ship deploys main plus ticked branches
+title: Ship skipped BUG FIXES session
 titleHistory:
 - '[Image #1]'
 - Fix Ship hanging on no-op branches
@@ -14,14 +14,14 @@ titleHistory:
 - Explain fleet's ghost rows from closed
 - Remove stale branch rows from fleet
 - Ship dialog skipped bg-bug-fixes branch
-state: done
-prompts: 11
+- Ship deploys main plus ticked branches
+state: needs_reply
+prompts: 12
 recap:
-- Ship deploys all of main, plus any ticked branches merged in
-- Each Ship merges ticked branches into a clean main copy, pushes it, and deploys
-- The 14:57 Ship deployed 6a42c2d, including the earlier BUG FIXES work
-- Later BUG FIXES commits like 3db2abc and 73f1b3a never reached main
-- Tick BUG FIXES and press ⌘⇧D again to deploy them
+- Ship only merged the two ticked branches into main
+- BUG FIXES was still working, so it was greyed out and excluded
+- Press ⌘⇧D again to include and deploy it
+- 'Offered a fleet fix: auto-refresh and warn on busy sessions'
 lastMachine: MacBook Pro de Lucas
-updatedAt: 2026-11-27T18:29:44Z
+updatedAt: 2026-11-27T18:40:26Z
 archived: false
